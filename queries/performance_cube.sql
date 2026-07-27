@@ -20,11 +20,21 @@
 -- spans the 5th of calendar month N-1 through the 4th of calendar month N (e.g. Aug BP 2026 =
 -- Jul 5 -> Aug 4), matching flex-comp-engine's BP_Calendar exactly. BP quarters are 3 BP-months
 -- wide, grouped the same way DATE_TRUNC('quarter') groups calendar months (Jul/Aug/Sep BP =
--- Q3). "This Month"/"This Quarter" cap at CURRENT_DATE() (elapsed-to-date, matching the MTD/
--- QTD-collapse design) -- "Last Month"/"Last Quarter" use the full, already-elapsed period.
--- Validated live 2026-07-27: this_month = Jul 5 -> Jul 27 (today), last_month = Jun 5 -> Jul 4,
--- this_quarter = Jun 5 -> Jul 27, last_quarter = Mar 5 -> Jun 4. No reference table needed --
--- this formula never goes stale.
+-- Q3). No reference table needed -- this formula never goes stale.
+--
+-- PACING vs. FULL-PERIOD comparison -- Kevin caught this: comparing an elapsed "This Month"
+-- (say, 23 days in) against a FULL "Last Month" (~30 days) is apples to oranges -- it reads
+-- as "down" almost every day of the month even when pacing is identical, purely because less
+-- time has elapsed. Both comparisons are real questions, so both are here, distinctly named:
+--   last_month_mtd / last_quarter_qtd -- last period cut off at the SAME elapsed day count as
+--     "this" period right now. This is the pacing question: are we ahead or behind at this
+--     exact point in the cycle. THIS is the one to compare "this_month" against.
+--   last_month_full / last_quarter_full -- the entire prior period. This answers a different
+--     question: are we on track to beat last period's total by the time this one closes.
+-- Validated live 2026-07-27: this_month = Jul 5 -> Jul 27 (23 days), last_month_mtd = Jun 5 ->
+-- Jun 27 (23 days, pacing-matched), last_month_full = Jun 5 -> Jul 4 (30 days, full month).
+-- this_quarter = Jun 5 -> Jul 27 (53 days), last_quarter_qtd = Mar 5 -> Apr 26 (53 days,
+-- pacing-matched), last_quarter_full = Mar 5 -> Jun 4 (92 days, full quarter).
 --
 -- FILTER ESCAPING -- read before wiring any value filter here: team/rep names contain
 -- apostrophes ("Brandon's Team") that break naive '{{Value}}' string interpolation --
@@ -46,9 +56,16 @@ bp_periods AS (
         LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE())                              AS end_date
     FROM current_bp
     UNION ALL
-    SELECT 'last_month',
+    SELECT 'last_month_full',
         DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
         DATEADD(day, 3, DATEADD(month, -1, bp_month_label))
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_month_mtd',
+        DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
+        DATEADD(day,
+            DATEDIFF(day, DATEADD(day,4,DATEADD(month,-1,bp_month_label)), LEAST(DATEADD(day,3,bp_month_label), CURRENT_DATE())),
+            DATEADD(day, 4, DATEADD(month, -2, bp_month_label)))
     FROM current_bp
     UNION ALL
     SELECT 'this_quarter',
@@ -56,9 +73,17 @@ bp_periods AS (
         LEAST(DATEADD(day, 3, DATEADD(month, 2, DATE_TRUNC('quarter', bp_month_label))), CURRENT_DATE())
     FROM current_bp
     UNION ALL
-    SELECT 'last_quarter',
+    SELECT 'last_quarter_full',
         DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))),
         DATEADD(day, 3, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label)))
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_quarter_qtd',
+        DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))),
+        DATEADD(day,
+            DATEDIFF(day, DATEADD(day,4,DATEADD(month,-1,DATE_TRUNC('quarter', bp_month_label))),
+                          LEAST(DATEADD(day,3,DATEADD(month,2,DATE_TRUNC('quarter', bp_month_label))), CURRENT_DATE())),
+            DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))))
     FROM current_bp
     UNION ALL
     SELECT 'this_week', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE() FROM current_bp
