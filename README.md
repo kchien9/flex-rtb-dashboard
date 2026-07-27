@@ -21,7 +21,7 @@ lower priority — built and committed, but not blocking this week's work.**
 
 | File | Feeds | Notes |
 |---|---|---|
-| `queries/performance_cube.sql` | Performance page — meetings/pipeline/closed-won/lost, Week/Month/Quarter toggle, BP-aligned | Has a placeholder BP-month date CTE — see "Before you wire this up" below, must fix before shipping |
+| `queries/performance_cube.sql` | Performance page — meetings/pipeline/closed-won/lost, Week/Month/Quarter toggle, BP-aligned | BP periods are self-computing (no reference table, never goes stale) — ready |
 | `queries/rolled_out_units_cube.sql` | Rolled-Out Units page — recap/new/MSP/segment/team/deal-type, one query drives every slice via `{{ Dimension.value }}` | DSMB-excluded (account size <=750), filter-layering validated with 3+ filters at once |
 
 ### P1 — build once P0 is live
@@ -43,8 +43,8 @@ lower priority — built and committed, but not blocking this week's work.**
 
 ## Before you wire anything up — must-fix items
 
-1. **`performance_cube.sql`'s BP-period boundaries are hardcoded placeholder dates** (accurate as of 2026-07-27, will be wrong next month). Replace the `bp_periods` CTE with a real join to a BP_Calendar reference before this goes live, mirroring `flex-comp-engine/ingestion/config_loader.py`'s `bp_calendar`. This is the single most important fix before shipping P0 — everything else works, this one goes stale on a fixed clock.
-2. **Apostrophe escaping is unresolved at the Superblocks layer.** Every filter in this repo is written assuming Mustache string substitution (`'{{Value}}'`), which breaks on real values like "Brandon's Team" unless escaped. Confirm Superblocks' actual bind-parameter syntax for the Snowflake connector before wiring filters — if it supports named/positional bind params, use those instead of raw Mustache for every value filter (not the `{{ Dimension.value }}` column-name selector, which has to stay Mustache since it's a raw identifier, not a value — constrain that dropdown's options in Superblocks so it's never free text).
+1. ~~`performance_cube.sql`'s BP-period boundaries were hardcoded placeholder dates~~ — **fixed 2026-07-27**, now self-computing off a verified date formula, no reference table, never goes stale.
+2. **Apostrophe escaping is unresolved at the Superblocks layer.** Every filter in this repo is written assuming Mustache string substitution (`'{{Value}}'`), which breaks on real values like "Brandon's Team" unless escaped. Confirm Superblocks' actual bind-parameter syntax for the Snowflake connector before wiring filters — if it supports named/positional bind params, use those instead of raw Mustache for every value filter (not the `{{ Dimension.value }}` column-name selector, which has to stay Mustache since it's a raw identifier, not a value — constrain that dropdown's options in Superblocks so it's never free text). **This is now the single biggest open item blocking P0.**
 3. **DSMB exclusion is not yet applied to `performance_cube.sql`** (the new-table Performance side) — only the old-table queries have it. Needs a live PMC-size check via `DIM_CRM_ACCOUNT_HISTORY.TOTAL_COMPANY_UNITS` or equivalent before this dashboard is SMB+-scoped end to end, not just on the units side.
 
 ## Known data quality gotchas
