@@ -16,12 +16,15 @@
 -- for "This BP Quarter" vs QTD -- so those aren't separate columns anymore, just what
 -- "This <granularity>" resolves to at the Month/Quarter setting.
 --
--- DO NOT hand-recompute BP boundaries with DATE_TRUNC for month/quarter -- they don't align
--- to calendar boundaries and will drift wrong. The bp_periods CTE below has hardcoded
--- boundaries for illustration only (accurate as of 2026-07-27) -- before this ships, replace
--- it with a real join to a BP_Calendar reference table/seed mirroring flex-comp-engine's
--- ingestion/config_loader.py bp_calendar (start_date/end_date per BP month label), so period
--- boundaries update automatically every month instead of going stale.
+-- BP boundaries are now SELF-COMPUTING, not hardcoded -- a fixed, verified rule: BP month N
+-- spans the 5th of calendar month N-1 through the 4th of calendar month N (e.g. Aug BP 2026 =
+-- Jul 5 -> Aug 4), matching flex-comp-engine's BP_Calendar exactly. BP quarters are 3 BP-months
+-- wide, grouped the same way DATE_TRUNC('quarter') groups calendar months (Jul/Aug/Sep BP =
+-- Q3). "This Month"/"This Quarter" cap at CURRENT_DATE() (elapsed-to-date, matching the MTD/
+-- QTD-collapse design) -- "Last Month"/"Last Quarter" use the full, already-elapsed period.
+-- Validated live 2026-07-27: this_month = Jul 5 -> Jul 27 (today), last_month = Jun 5 -> Jul 4,
+-- this_quarter = Jun 5 -> Jul 27, last_quarter = Mar 5 -> Jun 4. No reference table needed --
+-- this formula never goes stale.
 --
 -- FILTER ESCAPING -- read before wiring any value filter here: team/rep names contain
 -- apostrophes ("Brandon's Team") that break naive '{{Value}}' string interpolation --
@@ -32,14 +35,35 @@
 -- All filterable dimensions (Team, MSP, Deal Type, Segment) are included so they can be
 -- layered together, not just whichever one is the current row grouping.
 
-WITH bp_periods AS (
-    -- PLACEHOLDER -- replace with a real BP_Calendar lookup before shipping, see note above
-    SELECT 'this_month'   AS period, DATE '2026-07-05' AS start_date, DATE '2026-08-04' AS end_date
-    UNION ALL SELECT 'last_month',   DATE '2026-06-05', DATE '2026-07-04'
-    UNION ALL SELECT 'this_quarter', DATE '2026-06-05', DATE '2026-08-04'
-    UNION ALL SELECT 'last_quarter', DATE '2026-03-05', DATE '2026-06-04'
-    UNION ALL SELECT 'this_week',    DATE_TRUNC('week', CURRENT_DATE()),     CURRENT_DATE()
-    UNION ALL SELECT 'last_week',    DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1
+WITH current_bp AS (
+    SELECT IFF(DAY(CURRENT_DATE()) <= 4,
+               DATE_TRUNC('month', CURRENT_DATE()),
+               DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
+),
+bp_periods AS (
+    SELECT 'this_month' AS period,
+        DATEADD(day, 4, DATEADD(month, -1, bp_month_label))                                AS start_date,
+        LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE())                              AS end_date
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_month',
+        DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
+        DATEADD(day, 3, DATEADD(month, -1, bp_month_label))
+    FROM current_bp
+    UNION ALL
+    SELECT 'this_quarter',
+        DATEADD(day, 4, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label))),
+        LEAST(DATEADD(day, 3, DATEADD(month, 2, DATE_TRUNC('quarter', bp_month_label))), CURRENT_DATE())
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_quarter',
+        DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))),
+        DATEADD(day, 3, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label)))
+    FROM current_bp
+    UNION ALL
+    SELECT 'this_week', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE() FROM current_bp
+    UNION ALL
+    SELECT 'last_week', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
 )
 SELECT
     p.period,
