@@ -22,6 +22,15 @@
 -- it with a real join to a BP_Calendar reference table/seed mirroring flex-comp-engine's
 -- ingestion/config_loader.py bp_calendar (start_date/end_date per BP month label), so period
 -- boundaries update automatically every month instead of going stale.
+--
+-- FILTER ESCAPING -- read before wiring any value filter here: team/rep names contain
+-- apostrophes ("Brandon's Team") that break naive '{{Value}}' string interpolation --
+-- confirmed live elsewhere in this repo. Prefer Superblocks' native bind-parameter syntax
+-- for the Snowflake connector over raw Mustache substitution for every filter below; if only
+-- Mustache is available, double the apostrophes in the value before it reaches this query.
+--
+-- All filterable dimensions (Team, MSP, Deal Type, Segment) are included so they can be
+-- layered together, not just whichever one is the current row grouping.
 
 WITH bp_periods AS (
     -- PLACEHOLDER -- replace with a real BP_Calendar lookup before shipping, see note above
@@ -34,9 +43,10 @@ WITH bp_periods AS (
 )
 SELECT
     p.period,
-    e.TEAM_NAME                                                    AS team,
-    o.OPPORTUNITY_TYPE                                             AS deal_type,
-    o.PARTNER_MANAGEMENT_SOFTWARE                                  AS msp,
+    COALESCE(e.TEAM_NAME, 'Not Set')                               AS team,
+    COALESCE(o.OPPORTUNITY_TYPE, 'Not Set')                        AS deal_type,
+    COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set')             AS msp,
+    COALESCE(a.ACCOUNT_SEGMENT, 'Not Set')                         AS segment,
     COUNT(DISTINCT IFF(o.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date,
                        o.OPPORTUNITY_ID, NULL))                    AS pipeline_created,
     -- unit counts are the primary numbers -- this dashboard is about units, deal counts are
@@ -55,8 +65,14 @@ FROM bp_periods p
 JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON TRUE
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e
     ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
-{{#Team.value}} WHERE e.TEAM_NAME = '{{Team.value}}' {{/Team.value}}
-GROUP BY 1, 2, 3, 4
+LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a
+    ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+WHERE 1=1
+  {{#Team.value}}     AND e.TEAM_NAME = '{{Team.value}}'                       {{/Team.value}}
+  {{#Msp.value}}       AND o.PARTNER_MANAGEMENT_SOFTWARE = '{{Msp.value}}'     {{/Msp.value}}
+  {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}'          {{/DealType.value}}
+  {{#Segment.value}}   AND a.ACCOUNT_SEGMENT = '{{Segment.value}}'            {{/Segment.value}}
+GROUP BY 1, 2, 3, 4, 5
 ORDER BY 1, 2;
 
 -- Companion query: Meetings Completed (same bp_periods pattern, separate table).
@@ -65,7 +81,7 @@ ORDER BY 1, 2;
 -- WITH bp_periods AS ( ...same as above... )
 -- SELECT
 --     p.period,
---     e.TEAM_NAME AS team,
+--     COALESCE(e.TEAM_NAME, 'Not Set') AS team,
 --     COUNT(*) AS meetings_completed
 -- FROM bp_periods p
 -- JOIN FLEX.SALES.FCT_CRM_MEETING m

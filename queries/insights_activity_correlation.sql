@@ -20,6 +20,13 @@
 --   Strategic Team: activity down 49% (1446 -> 731), units down 51% (148,813 -> 73,295)
 --   Drilling into Strategic Team reps: Evan Klein down 75%, Doron David down 75%,
 --   Jennette Sanchez down 46% -- two reps account for most of the team's activity drop.
+--
+-- FILTER ESCAPING -- Part B's {{ Team.value }} = 'Strategic Team' works fine, but the same
+-- pattern breaks the moment someone clicks a row for "Brandon's Team" or "Cory's Team" --
+-- confirmed live elsewhere in this repo (naive '{{Value}}' interpolation is not apostrophe-
+-- safe). Prefer Superblocks' native bind-parameter syntax for the Snowflake connector over
+-- raw Mustache substitution here; if only Mustache is available, double the apostrophes in
+-- the value before it reaches this query.
 
 -- Part A: team-level correlation flag
 WITH activity AS (

@@ -7,6 +7,10 @@
 -- that are NOT meaningful callouts -- they're pods with only one active rep this month, so
 -- "driving" is trivially true. Added MIN_CONTRIBUTORS filter below to exclude those; re-verify
 -- once wired in, this was patched after the initial test run, not re-tested live yet.
+--
+-- FILTER ESCAPING -- {{ Segment.value }}/{{ Msp.value }} below narrow the scan. Same
+-- apostrophe-breaking risk as every other value filter in this repo -- prefer Superblocks
+-- bind parameters over raw Mustache substitution.
 
 WITH rep_units AS (
     SELECT
@@ -18,6 +22,8 @@ WITH rep_units AS (
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
       AND HUBSPOT_STATIC_TEAM_NAME_DEAL IS NOT NULL
       AND HUBSPOT_DEAL_OWNER IS NOT NULL
+      {{#Segment.value}} AND HUBSPOT_COMPANY_SEGMENT = '{{Segment.value}}' {{/Segment.value}}
+      {{#Msp.value}}      AND PMS = '{{Msp.value}}'                        {{/Msp.value}}
     GROUP BY 1, 2
     HAVING SUM(IFF(IS_NEW_INTEGRATED OR IS_RECAPTURED_NEW_ROLLOUT OR IS_RECAPTURED_OTHER,
                    PROPERTY_UNIT_COUNT, 0)) > 0   -- only reps who actually produced units
