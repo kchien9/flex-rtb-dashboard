@@ -1,72 +1,79 @@
 -- 1:1 Prep -- structures Sham's 1:1s with his 5 direct reports (Brandon, Dana, Rory,
--- Sebastian, Hans): high-level slice of their team, plus highlights/flags/trends so there's
--- always something concrete to talk about, not just "how's it going."
+-- Sebastian, Hans): a team-level trend ("Rory, your team did 50% less units this month vs
+-- last -- what's going on?") plus enough context to know WHY before the conversation starts,
+-- including whether the swing is headcount-driven (someone left/moved) vs. a real
+-- performance dip among people still on the team. Big picture first -- per Kevin, individual
+-- rep detail is secondary, this is about giving Sham something concrete per manager, not a
+-- roster browser.
 --
--- MANAGER ROSTER -- there is no clean manager-hierarchy field on the CRM side for this.
--- HUBSPOT_STATIC_TEAM_NAME_DEAL only has personalized team names for some managers
--- (Brandon's Team, Cory's Team, Heidi's Team) -- Rory, Sebastian, Dana, Hans's reports sit
--- under generic pod names (SMB Manager, Enterprise AE Manager, SDR Leadership) that don't
--- say which specific reps are theirs. The real source is Rippling (HR data), already used
--- by flex-comp-engine via comp_config_v4.xlsx's Rippling_Raw tab (reporting_to column) --
--- confirmed real rosters for 3 of 5 managers as of 2026-07-27:
---   Brandon Nicastro (6): Jenny Harrington, Umar Khan, Sunny Harden, Ally Yates,
---     Katie Brenes, Casey Grieshop
---   Rory Averett (8): Max Freund, Eli Greenberg, Ethan Sherman, Alyssa Freeman,
---     Jacob Fidler, Redding Tews, Caleb Benson, Tracy Do
---   Sebastian Bohlmann (9): Michael Brizuela, Veronica Breeden, Pedro Arias,
---     Luke McCarthy, Dani Bamber, Ruby Baer, Aaryn Chandler, Fiona Landers, Spencer Kendall
---   Hans Bredahl (13 reports) -- SDRs, not AEs, needs the activity-side tables
---     (FCT_CRM_TASK/FCT_CRM_MEETING), not this units-side query. Not yet built.
---   Dana Finch -- DOES NOT APPEAR in Rippling_Raw as a manager or a report. Real gap, not
---     guessed at -- either a name-spelling mismatch or her team isn't in this roster file.
---     Needs Kevin to confirm before her 1:1 card can be built for real.
+-- REBUILT 2026-07-27 -- first draft hardcoded a hand-typed roster (from Rippling's
+-- reporting_to field) as a VALUES CTE. Wrong call: that roster was stale the moment it was
+-- written (missing two of Rory's real reports -- Anttarch "AJ" Brandy wasn't in it at all --
+-- and didn't reflect Ruby Baer's recent move to Brandon's team). Comp rosters update on a
+-- payroll cadence, not in real time, and hardcoding a snapshot just re-creates the same
+-- staleness on a delay.
 --
--- No CREATE TABLE access on this Snowflake role, so the roster is embedded as a VALUES CTE --
--- same pattern already used for ALN data in flex-voyager (see that repo's
--- scripts/inject_aln_ctes.py). This roster WILL drift as reps join/leave/get reassigned --
--- needs a refresh process, not a one-time hardcode. Superblocks alternative: a small seed
--- table/reference sheet Kevin maintains directly, same idea, less brittle than editing SQL.
+-- FIX: don't track individual rosters at all. HUBSPOT_STATIC_TEAM_NAME_DEAL already carries
+-- a pod-level label (personalized for some managers -- "Brandon's Team" -- generic for
+-- others -- "SMB Account Executives 1/2") that IS the team grouping key, no roster needed.
+-- Confirmed with Kevin: SMB Account Executives 1 = Sebastian Bohlmann's pod, SMB Account
+-- Executives 2 = Rory Averett's pod. Dana's and Hans's pod names still need confirming
+-- (Hans manages SDRs -- activity-side tables, not this units-side query, separately).
 --
--- Validated against live Snowflake 2026-07-27 -- real team-level numbers, current vs. prior
--- BP month, Integrated Total units:
---   Brandon Nicastro: 1,772,387 (was 1,760,447)
---   Sebastian Bohlmann: 997,693 (was 968,628)
---   Rory Averett: 724,281 (was 713,225)
+-- DEPARTURE / REASSIGNMENT DETECTION -- the actual reason this matters: a team's number can
+-- drop because someone left, not because the remaining team underperformed, and those need
+-- different framing in a 1:1. Cross-referencing each historically-contributing rep against
+-- FLEX.STG_SALESFORCE.STG_SALESFORCE__USER's live IS_ACTIVE + TEAM_NAME (not the stale
+-- Rippling snapshot) distinguishes "still on the team, trending down" from "no longer here."
+-- Validated live 2026-07-27 on Rory's pod: Redding Tews and Jacob Fidler show
+-- IS_ACTIVE = FALSE (departed); Zach Branson now shows TEAM_NAME = Sebastian's pod, not
+-- Rory's (reassigned). Both would otherwise look like unexplained performance drops.
+--
+-- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
 
-WITH manager_roster AS (
-    SELECT * FROM VALUES
-        ('Jenny Harrington','Brandon Nicastro'), ('Umar Khan','Brandon Nicastro'), ('Sunny Harden','Brandon Nicastro'),
-        ('Ally Yates','Brandon Nicastro'), ('Katie Brenes','Brandon Nicastro'), ('Casey Grieshop','Brandon Nicastro'),
-        ('Max Freund','Rory Averett'), ('Eli Greenberg','Rory Averett'), ('Ethan Sherman','Rory Averett'),
-        ('Alyssa Freeman','Rory Averett'), ('Jacob Fidler','Rory Averett'), ('Redding Tews','Rory Averett'),
-        ('Caleb Benson','Rory Averett'), ('Tracy Do','Rory Averett'),
-        ('Michael Brizuela','Sebastian Bohlmann'), ('Veronica Breeden','Sebastian Bohlmann'), ('Pedro Arias','Sebastian Bohlmann'),
-        ('Luke McCarthy','Sebastian Bohlmann'), ('Dani Bamber','Sebastian Bohlmann'), ('Ruby Baer','Sebastian Bohlmann'),
-        ('Aaryn Chandler','Sebastian Bohlmann'), ('Fiona Landers','Sebastian Bohlmann'), ('Spencer Kendall','Sebastian Bohlmann')
-    AS t(rep, manager)
-)
--- Part A: team-level high-level slice, per manager
+-- Part A: team-level trend, per manager's pod -- the headline number for the 1:1
 SELECT
-    r.manager,
-    SUM(IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
-            AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))                              AS units_this,
-    SUM(IFF(s.BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-            AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))                              AS units_last
-FROM manager_roster r
-LEFT JOIN PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s ON s.HUBSPOT_DEAL_OWNER = r.rep
-{{#Manager.value}} WHERE r.manager = '{{Manager.value}}' {{/Manager.value}}
-GROUP BY 1;
+    '{{ PodName.value }}'                                                AS pod,
+    SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+            AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))            AS units_this,
+    SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+            AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))            AS units_last
+FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+WHERE HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}';
 
--- Part B: "something to talk about" -- reuse insights_driver_concentration.sql's pattern,
--- scoped to one manager's roster, to surface which of their reps is up/down this month.
--- WITH manager_roster AS ( ...same as above... )
--- SELECT r.rep,
---     SUM(IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
---             AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS units_this,
---     SUM(IFF(s.BP_MONTH = DATEADD(month,-1,(SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
---             AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS units_last
--- FROM manager_roster r
--- LEFT JOIN PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s ON s.HUBSPOT_DEAL_OWNER = r.rep
--- WHERE r.manager = '{{ Manager.value }}'
--- GROUP BY 1
--- ORDER BY (units_this - units_last) DESC;  -- biggest mover, up or down, per rep
+-- Part B: per-rep breakdown within the pod, classified current vs. departed/reassigned --
+-- the "why" behind Part A's number, and specifically what to flag as headcount context
+-- rather than a performance concern.
+SELECT
+    r.rep,
+    r.units_this,
+    r.units_last,
+    r.units_this - r.units_last                                          AS change,
+    u.TEAM_NAME                                                           AS current_team,
+    u.IS_ACTIVE                                                           AS currently_active,
+    CASE
+        WHEN u.IS_ACTIVE = FALSE THEN 'departed'
+        WHEN u.TEAM_NAME IS DISTINCT FROM '{{ PodName.value }}' THEN 'reassigned to ' || COALESCE(u.TEAM_NAME, 'unknown team')
+        ELSE 'still on team'
+    END                                                                   AS status
+FROM (
+    SELECT HUBSPOT_DEAL_OWNER AS rep,
+        SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+                AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))         AS units_this,
+        SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+                AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))         AS units_last
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}'
+    GROUP BY 1
+    HAVING units_this > 0 OR units_last > 0
+) r
+LEFT JOIN FLEX.STG_SALESFORCE.STG_SALESFORCE__USER u ON u.FULL_NAME = r.rep
+ORDER BY r.units_this - r.units_last ASC;
+
+-- Pod name reference (confirmed with Kevin 2026-07-27, Hans/Dana still open):
+--   Brandon Nicastro -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "Brandon's Team"
+--   Rory Averett     -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "SMB Account Executives 2"
+--   Sebastian Bohlmann -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "SMB Account Executives 1"
+--   Dana Finch       -> not yet confirmed, doesn't appear in Rippling_Raw either
+--   Hans Bredahl     -> SDR org, needs FCT_CRM_TASK/FCT_CRM_MEETING (activity), not this
+--     units-side query at all
