@@ -1,49 +1,56 @@
 -- Watch List, Section 1: Large Deals at Risk
 -- Sham's grain, not a rep's -- deal-level, size-weighted. A small stalled deal isn't worth
--- his attention (that's the AE manager's problem); a big one closed months ago and still not
--- rolled out is exactly the kind of thing he should see without having to go looking for it.
+-- his attention (that's the AE manager's problem); a big one that failed to roll out or is
+-- overdue is exactly the kind of thing he should see without having to go looking for it.
 --
--- Threshold: flags deals closed more than 24 days ago (2x the validated median close->rollout
--- lag of 12 days, see units_closed_forecast_bridge.sql) that still show no rollout, sized
--- >= 100 units. Both numbers are starting guesses -- tune SIZE_FLOOR and the day threshold
--- against what Sham actually finds worth seeing vs. noise.
+-- ==========================================================================================
+-- REBUILT 2026-07-27 ON THE RIGHT SOURCE -- everything before this was inference (checking
+-- PROPERTY_BP_MONTH_STATS for the ABSENCE of a positive rollout signal) and went through six
+-- rounds of real bugs: wrong join key type, missing historical check, BP-vs-calendar date
+-- mismatch, a property dedup/linking business process that orphans placeholder PROPERTY_IDs,
+-- Uplevel deals not tracked the same way as new rollouts, and ambiguous duplicate deal names.
 --
--- BUG FOUND AND FIXED 2026-07-27 -- Kevin caught this live: the first version of this query
--- joined `li.PROPERTY_ID` (new table, internal numeric ID e.g. 1553602) to
--- `p.PROPERTY_PUBLIC_ID` (old table, "bv2..." string format) -- those never match, so the
--- join silently failed on EVERY row, making IS_ROLLED_OUT NULL regardless of actual status.
--- The query wasn't detecting stalled deals at all -- it was listing every closed deal older
--- than the threshold, whether it had rolled out or not. Real example of the false positive:
--- "Tricon Residential" showed as the #1 flagged deal (54,019 units, 151 days) despite having
--- actually rolled out in March -- `li.ROLLOUT_MONTH` said so directly, the broken join just
--- never surfaced it. Fixed by joining `li.PROPERTY_ID = p.PROPERTY_ID` (both numeric,
--- confirmed matching format via FLEX.MART.DIM_PROPERTY). Re-validated: Tricon correctly
--- resolves to IS_ROLLED_OUT = TRUE with the fix, and the real flagged list is now much
--- smaller and different (real top row: "Preferred Apartment Communities, Inc. Expansion",
--- Strategic Team, 5,351 units, 154 days).
+-- Kevin caught the final case directly in Salesforce: "Preferred Apartment Communities, Inc.
+-- Expansion" (opportunity 006Pe00000y5On7IAE) really had failed -- Stage "Failed to Roll
+-- Out", reason "PMC Changed Their Mind" -- and pointed at the actual source of truth:
+-- Salesforce has a dedicated Implementation object for exactly this. It's synced into
+-- Snowflake as FLEX.STG_SALESFORCE.STG_SALESFORCE__IMPLEMENTATION, with IMPLEMENTATION_STAGE,
+-- ROLL_OUT_FAILURE_REASON, DELAYED_REASON, and a direct OPPORTUNITY_ID join -- no inference
+-- needed at all. This replaces every heuristic above.
+--
+-- IMPLEMENTATION_STAGE values (confirmed live, IS_DELETED = FALSE): Ready to Market (9,981
+-- records, the completed/live state), Ready to Onboard (547), Failed to Roll Out (498,
+-- 181,528 units -- the definitive failure state), Onboarding Delayed (101), Onboarding In
+-- Progress (66), Partial Deal Active (29).
+--
+-- "Failed to Roll Out" is terminal -- flag regardless of date. "Onboarding Delayed" is only
+-- a real risk once its own anticipated go-live date has actually passed -- a few delayed
+-- records had anticipated dates still in the current/future BP period, which isn't overdue,
+-- it's just in progress. Filtered accordingly below.
+-- ==========================================================================================
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
 
 SELECT
-    o.OPPORTUNITY_NAME                                     AS deal,
-    COALESCE(e.TEAM_NAME, 'Not Set')                        AS team,
-    SUM(li.UNIT_COUNT)                                      AS units,
-    o.CLOSED_AT_UTC                                         AS closed_date,
-    DATEDIFF(day, o.CLOSED_AT_UTC, CURRENT_DATE())          AS days_since_close,
-    o.OPPORTUNITY_NAME || ' (' || SUM(li.UNIT_COUNT) || ' units) closed ' ||
-        DATEDIFF(day, o.CLOSED_AT_UTC, CURRENT_DATE()) ||
-        ' days ago and still hasn''t rolled out'            AS callout
-FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
-JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
+    o.OPPORTUNITY_ID                                        AS opportunity_id,
+    i.IMPLEMENTATION_NAME                                    AS implementation,
+    i.IMPLEMENTATION_STAGE                                   AS stage,
+    COALESCE(i.ROLL_OUT_FAILURE_REASON, i.DELAYED_REASON)    AS reason,
+    i.FLEX_UNITS                                             AS units,
+    COALESCE(e.TEAM_NAME, 'Not Set')                         AS team,
+    i.ANTICIPATED_GO_LIVE_DATE                                AS anticipated_go_live_date,
+    i.IMPLEMENTATION_NAME || ' -- ' || i.IMPLEMENTATION_STAGE ||
+        IFF(COALESCE(i.ROLL_OUT_FAILURE_REASON, i.DELAYED_REASON) IS NOT NULL,
+            ' (' || COALESCE(i.ROLL_OUT_FAILURE_REASON, i.DELAYED_REASON) || ')', '') ||
+        ' -- ' || i.FLEX_UNITS || ' units'                    AS callout
+FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__IMPLEMENTATION i
+LEFT JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON i.OPPORTUNITY_ID = o.OPPORTUNITY_ID
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
-LEFT JOIN PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS p
-    ON li.PROPERTY_ID = p.PROPERTY_ID
-    AND p.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
-WHERE o.IS_CLOSED_WON
-  AND o.CLOSED_AT_UTC <= DATEADD(day, -{{ RiskDaysThreshold.value }}, CURRENT_DATE())  -- default 24
-  AND o.CLOSED_AT_UTC >= DATEADD(month, -6, CURRENT_DATE())
-  AND (p.IS_ROLLED_OUT IS NULL OR p.IS_ROLLED_OUT = FALSE)
+WHERE i.IS_DELETED = FALSE
+  AND i.FLEX_UNITS >= {{ SizeFloor.value }}  -- default 100
+  AND (
+      i.IMPLEMENTATION_STAGE = 'Failed to Roll Out'
+      OR (i.IMPLEMENTATION_STAGE = 'Onboarding Delayed' AND i.ANTICIPATED_GO_LIVE_DATE < CURRENT_DATE())
+  )
   {{#Team.value}} AND e.TEAM_NAME = '{{Team.value}}' {{/Team.value}}
-GROUP BY 1, 2, 4, 5
-HAVING SUM(li.UNIT_COUNT) >= {{ SizeFloor.value }}  -- default 100
-ORDER BY units DESC;
+ORDER BY i.FLEX_UNITS DESC;
