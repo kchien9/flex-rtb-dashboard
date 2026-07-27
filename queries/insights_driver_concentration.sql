@@ -11,22 +11,34 @@
 -- FILTER ESCAPING -- {{ Segment.value }}/{{ Msp.value }} below narrow the scan. Same
 -- apostrophe-breaking risk as every other value filter in this repo -- prefer Superblocks
 -- bind parameters over raw Mustache substitution.
+--
+-- DSMB EXCLUSION (base filter, permanent) -- same rule as rolled_out_units_cube.sql: exclude
+-- PMCs whose CURRENT live unit total is <=750, by account size only, never by segment label
+-- or team ownership. See that file for the full writeup of why.
 
-WITH rep_units AS (
-    SELECT
-        HUBSPOT_STATIC_TEAM_NAME_DEAL AS team,
-        HUBSPOT_DEAL_OWNER            AS rep,
-        SUM(IFF(IS_NEW_INTEGRATED OR IS_RECAPTURED_NEW_ROLLOUT OR IS_RECAPTURED_OTHER,
-                PROPERTY_UNIT_COUNT, 0)) AS units
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
-      AND HUBSPOT_STATIC_TEAM_NAME_DEAL IS NOT NULL
-      AND HUBSPOT_DEAL_OWNER IS NOT NULL
-      {{#Segment.value}} AND HUBSPOT_COMPANY_SEGMENT = '{{Segment.value}}' {{/Segment.value}}
-      {{#Msp.value}}      AND PMS = '{{Msp.value}}'                        {{/Msp.value}}
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+rep_units AS (
+    SELECT
+        s.HUBSPOT_STATIC_TEAM_NAME_DEAL AS team,
+        s.HUBSPOT_DEAL_OWNER            AS rep,
+        SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER,
+                s.PROPERTY_UNIT_COUNT, 0)) AS units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND s.HUBSPOT_STATIC_TEAM_NAME_DEAL IS NOT NULL
+      AND s.HUBSPOT_DEAL_OWNER IS NOT NULL
+      AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      {{#Segment.value}} AND s.HUBSPOT_COMPANY_SEGMENT = '{{Segment.value}}' {{/Segment.value}}
+      {{#Msp.value}}      AND s.PMS = '{{Msp.value}}'                        {{/Msp.value}}
     GROUP BY 1, 2
-    HAVING SUM(IFF(IS_NEW_INTEGRATED OR IS_RECAPTURED_NEW_ROLLOUT OR IS_RECAPTURED_OTHER,
-                   PROPERTY_UNIT_COUNT, 0)) > 0   -- only reps who actually produced units
+    HAVING units > 0   -- only reps who actually produced units
 ),
 team_totals AS (
     SELECT team, SUM(units) AS team_units, COUNT(*) AS contributor_count

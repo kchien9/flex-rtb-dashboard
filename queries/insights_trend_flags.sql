@@ -23,20 +23,34 @@
 -- Strategic"). Same apostrophe-breaking risk as every other value filter in this repo if a
 -- segment name ever contains one -- none currently do, but don't assume that holds forever;
 -- prefer Superblocks bind parameters over raw Mustache substitution here too.
+--
+-- DSMB EXCLUSION (base filter, permanent) -- same rule as rolled_out_units_cube.sql: exclude
+-- PMCs whose CURRENT live unit total is <=750, by account size only, never by segment label
+-- or team ownership (both tested against real data and don't reliably match "DSMB"). See that
+-- file for the full writeup of why.
 
-WITH monthly AS (
-    SELECT
-        DATE_TRUNC('month', BP_MONTH) AS bp_month,
-        HUBSPOT_COMPANY_SEGMENT       AS segment,
-        PMS                            AS msp,
-        SUM(IFF(IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0)) AS units
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-    WHERE BP_MONTH >= DATEADD(month, -3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-      AND HUBSPOT_COMPANY_SEGMENT IS NOT NULL
-      AND HUBSPOT_COMPANY_SEGMENT NOT IN ('No Company Units')
-      AND PMS IS NOT NULL
-      {{#Segment.value}} AND HUBSPOT_COMPANY_SEGMENT = '{{Segment.value}}' {{/Segment.value}}
-      {{#Team.value}}    AND HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{Team.value}}' {{/Team.value}}
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+monthly AS (
+    SELECT
+        DATE_TRUNC('month', s.BP_MONTH) AS bp_month,
+        s.HUBSPOT_COMPANY_SEGMENT       AS segment,
+        s.PMS                            AS msp,
+        SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE s.BP_MONTH >= DATEADD(month, -3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.HUBSPOT_COMPANY_SEGMENT IS NOT NULL
+      AND s.HUBSPOT_COMPANY_SEGMENT NOT IN ('No Company Units')
+      AND s.PMS IS NOT NULL
+      AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      {{#Segment.value}} AND s.HUBSPOT_COMPANY_SEGMENT = '{{Segment.value}}' {{/Segment.value}}
+      {{#Team.value}}    AND s.HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{Team.value}}' {{/Team.value}}
     GROUP BY 1, 2, 3
 ),
 with_change AS (
