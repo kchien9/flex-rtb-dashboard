@@ -31,8 +31,13 @@ lower priority — built and committed, but not blocking this week's work.**
 | `queries/insights_trend_flags.sql` | Insights panel — spike/dip callouts | DSMB-excluded, BP-month resolved from data not `CURRENT_DATE()` |
 | `queries/insights_driver_concentration.sql` | Insights panel — "who's actually driving this" | DSMB-excluded |
 | `queries/insights_activity_correlation.sql` | Insights panel — activity<->units correlation + rep drill-in | New `FLEX.SALES.*` tables, real validated example (Strategic Team) |
+| `queries/insights_closed_lost_trend.sql` | Insights panel — is loss rate rising, and why | Rate not raw count; `CLOSED_LOST_REASON` breakdown; current in-progress month dropped from the trend line |
+| `queries/insights_stage_velocity.sql` | Insights panel — deal-cycle time trend + currently-stuck deals | WITHIN-segment only (never Strategic vs. SMB — different cycle lengths are structural, not a signal); censoring-safe (Part A resolved-only, Part B is the open-ended complement) |
+| `queries/insights_mix_shift.sql` | Insights panel — Sham's composition "pulse" (expansion share, recapture share, MSP concentration) | DSMB-excluded; see header for a real fan-out bug caught while validating |
 | `queries/watchlist_large_deals_at_risk.sql` | Watch List tab — large deals that failed/stalled | Built on `FLEX.STG_SALESFORCE.STG_SALESFORCE__IMPLEMENTATION` (the real source of truth — see bug history in the file, six rounds of real bugs before landing here) |
 | `queries/units_closed_forecast_bridge.sql` | "Units closed, awaiting rollout" forward-looking context | Validated median close->rollout lag: 12 days |
+| `queries/opportunity_drilldown.sql` | Bottom of every drill chain — the actual deals behind any unit slice | Aggregated to opportunity grain via `FCT_CRM_OPPORTUNITY_LINE_ITEM`; ties out to `rep_leaderboard.sql` (validated) |
+| `queries/rep_leaderboard.sql` | Rep-level ranked view — on-demand, not default | Sham manages managers by default, but wanted rep-level access available; wire as a drill-through, not a headline panel |
 
 ### Paused — lower priority, committed but not blocking
 
@@ -55,6 +60,9 @@ lower priority — built and committed, but not blocking this week's work.**
 - **"Did a deal roll out" — use `FLEX.STG_SALESFORCE.STG_SALESFORCE__IMPLEMENTATION`**, not inference from `PROPERTY_BP_MONTH_STATS` flags. That inference path cost six rounds of real bugs (wrong join key, missing history, BP-vs-calendar mismatch, property dedup/linking, Uplevel deals not flagged the same way, ambiguous duplicate deal names) before landing on the actual authoritative source. Full writeup in `watchlist_large_deals_at_risk.sql`'s header comment — read it before touching implementation-status logic anywhere else in this repo.
 - **PMC size for DSMB exclusion**: use each PMC's *current* live unit total (summed fresh), not the stored `HUBSPOT_DEAL_TOTAL_COMPANY_UNITS` field — that's a deal-time snapshot that disagrees with current reality on ~13% of PMCs.
 - **Rep-level status**: for departure/reassignment checks, use `FLEX.STG_SALESFORCE.STG_SALESFORCE__USER`'s live `IS_ACTIVE`/`TEAM_NAME`, not the Rippling comp roster (`comp_config_v4.xlsx`) — that updates on a payroll cadence and goes stale on real-time reassignments.
+- **No verified "segment" field exists on the new tables yet.** `insights_stage_velocity.sql` buckets `FLEX.SALES.FCT_CRM_OPPORTUNITY.STATIC_TEAM_NAME` into SMB / DSMB / Strategic-MM as a segment proxy (same logic as the old-table team-as-segment pattern elsewhere in this repo). Pods that aren't a real AE segment (Partner Success, Rev Ops, Channel Sales, House Accounts, SDR-only pods) are excluded outright, not lumped into "Other."
+- **Stuck-deal / stale-pipeline lists will surface zombie deals from departed reps** — validated live: several of the longest-"stuck" negotiation deals belong to reps already confirmed departed in `oneonone_prep.sql` (Jacob Fidler, Redding Tews). These are deals nobody closed out, not real 700+ day negotiations. Worth a "still assigned to a departed rep" flag if this becomes a real feature.
+- **Aggregating a per-dimension monthly total and joining it back to a wider table on date alone fans out rows** — confirmed live bug in an early draft of `insights_mix_shift.sql`: joining a per-BP_MONTH-x-PMS table back to the base table on `BP_MONTH` only (not also `PMS`) multiplied every base row once per distinct PMS value that month, inflating `total_units` ~7x and corrupting every share metric silently. Fix: collapse to one row per grouping key FIRST, then join.
 
 ## Superblocks wiring notes
 
