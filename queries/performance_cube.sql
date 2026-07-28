@@ -135,7 +135,19 @@ bp_periods AS (
     UNION ALL
     SELECT 'this_week', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE() FROM current_bp
     UNION ALL
-    SELECT 'last_week', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
+    SELECT 'last_week_full', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
+    UNION ALL
+    -- pacing-matched: last week cut off at the SAME elapsed day count as this_week right
+    -- now (e.g. if today is only 1 day into this week, this is just last week's day 1) --
+    -- same fix as last_month_mtd/last_quarter_qtd above, applied to week too. This was
+    -- missed originally -- caught 2026-07-28 when Kevin asked whether This Week/Last Week
+    -- should show side by side; comparing this_week (partial) to last_week_full (all 7
+    -- days) has the identical apples-to-oranges problem the month/quarter fix already
+    -- solved, just never applied here.
+    SELECT 'last_week_wtd',
+        DATE_TRUNC('week', CURRENT_DATE()) - 7,
+        (DATE_TRUNC('week', CURRENT_DATE()) - 7) + DATEDIFF(day, DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE())
+    FROM current_bp
 ),
 base AS (
     SELECT
@@ -211,7 +223,19 @@ bp_periods AS (
     UNION ALL
     SELECT 'this_week', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE() FROM current_bp
     UNION ALL
-    SELECT 'last_week', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
+    SELECT 'last_week_full', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
+    UNION ALL
+    -- pacing-matched: last week cut off at the SAME elapsed day count as this_week right
+    -- now (e.g. if today is only 1 day into this week, this is just last week's day 1) --
+    -- same fix as last_month_mtd/last_quarter_qtd above, applied to week too. This was
+    -- missed originally -- caught 2026-07-28 when Kevin asked whether This Week/Last Week
+    -- should show side by side; comparing this_week (partial) to last_week_full (all 7
+    -- days) has the identical apples-to-oranges problem the month/quarter fix already
+    -- solved, just never applied here.
+    SELECT 'last_week_wtd',
+        DATE_TRUNC('week', CURRENT_DATE()) - 7,
+        (DATE_TRUNC('week', CURRENT_DATE()) - 7) + DATEDIFF(day, DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE())
+    FROM current_bp
 )
 SELECT
     p.period,
