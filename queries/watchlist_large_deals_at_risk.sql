@@ -30,6 +30,16 @@
 -- ==========================================================================================
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
+--
+-- TEAM BUCKET (added 2026-07-28) -- same mapping as performance_cube.sql/
+-- rolled_out_units_cube.sql, scoped to Sham's 4 units-side direct-report managers. Same
+-- caveat as the Meetings query in performance_cube.sql: built off DIM_EMPLOYEE_HISTORY.
+-- TEAM_NAME (rep-grain), which has real data quality gaps -- flag, don't silently trust.
+--
+-- SALESFORCE LINK -- opportunity_id is already the real Salesforce Opportunity ID (the "006"
+-- prefix is Salesforce's standard Opportunity ID format) -- link directly to
+-- https://<domain>.lightning.force.com/lightning/r/Opportunity/{opportunity_id}/view in
+-- Superblocks, don't add anything else to this query for that.
 
 SELECT
     o.OPPORTUNITY_ID                                        AS opportunity_id,
@@ -38,6 +48,13 @@ SELECT
     COALESCE(i.ROLL_OUT_FAILURE_REASON, i.DELAYED_REASON)    AS reason,
     i.FLEX_UNITS                                             AS units,
     COALESCE(e.TEAM_NAME, 'Not Set')                         AS team,
+    CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+        ELSE NULL
+    END                                                       AS team_bucket,
     i.ANTICIPATED_GO_LIVE_DATE                                AS anticipated_go_live_date,
     i.IMPLEMENTATION_NAME || ' -- ' || i.IMPLEMENTATION_STAGE ||
         IFF(COALESCE(i.ROLL_OUT_FAILURE_REASON, i.DELAYED_REASON) IS NOT NULL,
@@ -52,5 +69,11 @@ WHERE i.IS_DELETED = FALSE
       i.IMPLEMENTATION_STAGE = 'Failed to Roll Out'
       OR (i.IMPLEMENTATION_STAGE = 'Onboarding Delayed' AND i.ANTICIPATED_GO_LIVE_DATE < CURRENT_DATE())
   )
-  {{#Team.value}} AND e.TEAM_NAME = '{{Team.value}}' {{/Team.value}}
+  {{#Team.value}} AND CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+        ELSE NULL
+    END = '{{Team.value}}' {{/Team.value}}
 ORDER BY i.FLEX_UNITS DESC;

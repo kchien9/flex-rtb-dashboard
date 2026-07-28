@@ -21,12 +21,27 @@
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo (see
 -- rolled_out_units_cube.sql header). Team/Rep filters especially -- double apostrophes if
 -- passing raw Mustache.
+--
+-- TEAM BUCKET (added 2026-07-28) -- same mapping used everywhere else in this repo, so the
+-- Team filter behaves consistently when this drill-down sits underneath a Team-filtered
+-- parent view. Note this table is joined via DIM_EMPLOYEE_HISTORY (rep-grain) -- same known
+-- data-quality caveat as the Meetings query in performance_cube.sql.
+--
+-- SALESFORCE LINK -- opportunity_id is already in the SELECT list, this is the field to build
+-- the deep link from in Superblocks: every row in this drill-down should be clickable.
 
 SELECT
     o.OPPORTUNITY_NAME                                 AS opportunity,
     o.OPPORTUNITY_TYPE                                 AS deal_type,
     e.FULL_NAME                                        AS rep,
     e.TEAM_NAME                                        AS team,
+    CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+        ELSE NULL
+    END                                                 AS team_bucket,
     li.ROLLOUT_MONTH                                   AS bp_month,
     SUM(li.UNIT_COUNT)                                 AS units,
     COUNT(DISTINCT li.PROPERTY_ID)                     AS properties,
@@ -37,8 +52,14 @@ JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON li.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CU
 LEFT JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
 WHERE li.ROLLOUT_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
   {{#Rep.value}}       AND e.FULL_NAME = '{{Rep.value}}'         {{/Rep.value}}
-  {{#Team.value}}      AND e.TEAM_NAME = '{{Team.value}}'        {{/Team.value}}
+  {{#Team.value}}      AND CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+        ELSE NULL
+    END = '{{Team.value}}' {{/Team.value}}
   {{#BpMonth.value}}   AND li.ROLLOUT_MONTH = '{{BpMonth.value}}' {{/BpMonth.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
-GROUP BY 1, 2, 3, 4, 5, 8, 9
+GROUP BY 1, 2, 3, 4, 5, 6, 9, 10
 ORDER BY units DESC;
