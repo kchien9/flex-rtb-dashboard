@@ -66,8 +66,12 @@ lower priority — built and committed, but not blocking this week's work.**
 
 ## Superblocks wiring notes
 
+Full step-by-step (datasource setup, every component you need to build, apostrophe-escaping
+fix, build order, drill-down click wiring) is in **[`docs/superblocks-setup.md`](docs/superblocks-setup.md)**.
+Quick summary:
+
 - `{{ Component.value }}` = Mustache bindings to filter/dropdown components, same pattern as `flex-voyager`.
 - `{{ Dimension.value }}` on the Rolled-Out Units Cube is a dropdown bound to a raw column name — this is what makes one query drive every slice. Constrain its options in Superblocks; never let it be free text.
-- Drill-down: clicking a row sets a filter to that value and switches the next dimension level. Same query re-fires, no new query per drill level.
+- Drill-down: clicking a row sets a filter to that value and switches the next dimension level. Same query re-fires, no new query per drill level. Every drill chain should bottom out in `opportunity_drilldown.sql` — the actual deals behind the number.
 - Team x MSP / Segment x Deal Type style matrix views: pick a primary "slice by" dimension, an optional "compare by" second dimension (turns the panel into a 2D table), everything else becomes a filter chip. Don't build a full N-dimensional pivot table — past 2 visual dimensions it stops being readable regardless of how capable the query is.
 - Insights panel: run the insight queries on a schedule (daily/weekly, TBD) and bind the `callout` column to a text list at the top of the dashboard.
