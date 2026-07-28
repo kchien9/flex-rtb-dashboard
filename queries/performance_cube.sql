@@ -58,8 +58,41 @@
 --
 -- All filterable dimensions (Team, MSP, Deal Type, Segment) are included so they can be
 -- layered together, not just whichever one is the current row grouping.
+--
+-- DSMB + SEGMENT BUCKET (fixed 2026-07-28 -- this was flagged as an open gap since the
+-- start of this repo and left unfixed for too long; Kevin caught it live in Superblocks
+-- showing DSMB pods and raw team names instead of the 4 real segments). Same fix as
+-- rolled_out_units_cube.sql, adapted to this table's join path:
+--   - DSMB exclusion: DIM_CRM_ACCOUNT_HISTORY has both PMC_ID and its own
+--     TOTAL_COMPANY_UNITS, but TOTAL_COMPANY_UNITS is the same kind of deal-time snapshot
+--     that was already proven unreliable on the old table -- don't use it. Instead join
+--     DIM_CRM_ACCOUNT_HISTORY.PMC_ID straight into the SAME pmc_size CTE (current live
+--     unit total from PROPERTY_BP_MONTH_STATS) used everywhere else in this repo -- one
+--     definition of "is this PMC DSMB-sized," not a second one that can drift out of sync.
+--   - segment_bucket: same mapping as rolled_out_units_cube.sql (Brandon's Team -> MM/Ent;
+--     Strategic Team / Cory's Team / Heidi's Team -> Strategic; SMB Account Executives
+--     (1/2/unnumbered) -> SMB; House Accounts -> House Accounts; NULL -> Not Set;
+--     everything else -- DSMB *, Partner Success, SDR pods, leadership-only pods --
+--     excluded). Built here off FCT_CRM_OPPORTUNITY.STATIC_TEAM_NAME (deal-grain),
+--     validated live to have the same real pod names as the old table. Deliberately NOT
+--     built off DIM_EMPLOYEE_HISTORY.TEAM_NAME (rep-grain) -- that field has real data
+--     quality problems (duplicate rows per employee, inconsistent labels like "Enterprise
+--     AE Manager" instead of a pod name) that STATIC_TEAM_NAME doesn't have.
+--   - The Meetings Completed companion query below still groups by DIM_EMPLOYEE_HISTORY.
+--     TEAM_NAME (raw pod name, no segment_bucket, no DSMB filter) -- meetings aren't tied
+--     to a PMC/account the way deals are, so the DSMB-by-account-size concept doesn't
+--     apply the same way. Flagging as a real inconsistency (this page will show 4 clean
+--     segments in one section and raw pod names in another) rather than silently leaving
+--     it -- fix later if Sham finds the mismatch confusing in practice.
 
-WITH current_bp AS (
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
                DATE_TRUNC('month', CURRENT_DATE()),
                DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
@@ -103,13 +136,25 @@ bp_periods AS (
     SELECT 'this_week', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE() FROM current_bp
     UNION ALL
     SELECT 'last_week', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
+),
+base AS (
+    SELECT
+        o.*,
+        CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN o.STATIC_TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN o.STATIC_TEAM_NAME IS NULL THEN 'Not Set'
+            ELSE NULL
+        END AS segment_bucket
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
 )
 SELECT
     p.period,
-    COALESCE(e.TEAM_NAME, 'Not Set')                               AS team,
+    o.segment_bucket,
     COALESCE(o.OPPORTUNITY_TYPE, 'Not Set')                        AS deal_type,
     COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set')             AS msp,
-    COALESCE(a.ACCOUNT_SEGMENT, 'Not Set')                         AS segment,
     COUNT(DISTINCT IFF(o.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date,
                        o.OPPORTUNITY_ID, NULL))                    AS pipeline_created,
     -- unit counts are the primary numbers -- this dashboard is about units, deal counts are
@@ -125,17 +170,17 @@ SELECT
     SUM(IFF(o.IS_CLOSED AND NOT o.IS_CLOSED_WON AND o.CLOSED_AT_UTC BETWEEN p.start_date AND p.end_date,
             o.FLEX_UNIT_COUNT, 0))                                 AS closed_lost_units
 FROM bp_periods p
-JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON TRUE
-LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e
-    ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+JOIN base o ON TRUE
 LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a
     ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
-WHERE 1=1
-  {{#Team.value}}     AND e.TEAM_NAME = '{{Team.value}}'                       {{/Team.value}}
+LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
+WHERE (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
+  AND o.segment_bucket IS NOT NULL
+  {{#Team.value}}     AND o.STATIC_TEAM_NAME = '{{Team.value}}'                {{/Team.value}}
   {{#Msp.value}}       AND o.PARTNER_MANAGEMENT_SOFTWARE = '{{Msp.value}}'     {{/Msp.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}'          {{/DealType.value}}
-  {{#Segment.value}}   AND a.ACCOUNT_SEGMENT = '{{Segment.value}}'            {{/Segment.value}}
-GROUP BY 1, 2, 3, 4, 5
+  {{#Segment.value}}   AND o.segment_bucket = '{{Segment.value}}'             {{/Segment.value}}
+GROUP BY 1, 2, 3, 4
 ORDER BY 1, 2;
 
 -- Companion query: Meetings Completed (same bp_periods pattern, separate table). THIS is the
@@ -143,6 +188,9 @@ ORDER BY 1, 2;
 -- meaningful -- see the note above. Renamed from "Tours" -- that was terminology from a prior
 -- employer, not a Flex term; Flex calls this "Meetings Completed" everywhere else
 -- (SALES_METRICS semantic view, etc). Validated live 2026-07-27.
+-- NOTE: groups by DIM_EMPLOYEE_HISTORY.TEAM_NAME (raw pod name), not segment_bucket -- see
+-- header comment above for why (meetings aren't tied to a PMC/account, and the rep-grain
+-- team field has real data quality problems the deal-grain field doesn't).
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
                DATE_TRUNC('month', CURRENT_DATE()),
