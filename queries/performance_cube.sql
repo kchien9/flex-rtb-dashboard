@@ -36,6 +36,20 @@
 -- this_quarter = Jun 5 -> Jul 27 (53 days), last_quarter_qtd = Mar 5 -> Apr 26 (53 days,
 -- pacing-matched), last_quarter_full = Mar 5 -> Jun 4 (92 days, full quarter).
 --
+-- WHICH METRICS ACTUALLY GET A PACING %-CHANGE -- resolved with Kevin 2026-07-27, don't
+-- relitigate without re-reading this: Meetings Completed gets pacing (this_month vs
+-- last_month_mtd) -- AE/SDR activity has a real expected daily/weekly rhythm (SDR call/
+-- meeting-booking quotas exist, and the whole SDR -> AE meeting -> pipeline -> closed-won ->
+-- units chain is causally connected), so a same-elapsed-day comparison is meaningful.
+-- closed_won_units / closed_lost_units do NOT get a pacing %-change -- AEs are held to unit
+-- targets, not activity targets, and unlike activity, units have no week-by-week regularity: a
+-- single large deal can land at the beginning or end of a BP period essentially arbitrarily,
+-- so "day 23 vs day 23" for units is closer to a coin flip than a real signal. Show
+-- closed_won_units/closed_lost_units as a running total for the period; last_month_full is
+-- still fine to show for context ("on track to beat last month's total"), just never compute
+-- a delta against last_month_mtd for these two columns specifically. This is a Superblocks
+-- presentation-layer rule as much as a query one -- the query returns all periods' raw
+-- numbers regardless; don't wire a pacing-delta widget onto the units columns.
 -- FILTER ESCAPING -- read before wiring any value filter here: team/rep names contain
 -- apostrophes ("Brandon's Team") that break naive '{{Value}}' string interpolation --
 -- confirmed live elsewhere in this repo. Prefer Superblocks' native bind-parameter syntax
@@ -124,19 +138,43 @@ WHERE 1=1
 GROUP BY 1, 2, 3, 4, 5
 ORDER BY 1, 2;
 
--- Companion query: Meetings Completed (same bp_periods pattern, separate table).
--- Renamed from "Tours" -- that was terminology from a prior employer, not a Flex term;
--- Flex calls this "Meetings Completed" everywhere else (SALES_METRICS semantic view, etc).
--- WITH bp_periods AS ( ...same as above... )
--- SELECT
---     p.period,
---     COALESCE(e.TEAM_NAME, 'Not Set') AS team,
---     COUNT(*) AS meetings_completed
--- FROM bp_periods p
--- JOIN FLEX.SALES.FCT_CRM_MEETING m
---     ON m.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date
--- LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e
---     ON m.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
--- WHERE m.MEETING_TYPE = 'meeting' AND m.MEETING_STATUS = 'completed'
--- {{#Team.value}} AND e.TEAM_NAME = '{{Team.value}}' {{/Team.value}}
--- GROUP BY 1, 2;
+-- Companion query: Meetings Completed (same bp_periods pattern, separate table). THIS is the
+-- one metric on this page where a pacing %-change (this_month vs last_month_mtd) is
+-- meaningful -- see the note above. Renamed from "Tours" -- that was terminology from a prior
+-- employer, not a Flex term; Flex calls this "Meetings Completed" everywhere else
+-- (SALES_METRICS semantic view, etc). Validated live 2026-07-27.
+WITH current_bp AS (
+    SELECT IFF(DAY(CURRENT_DATE()) <= 4,
+               DATE_TRUNC('month', CURRENT_DATE()),
+               DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
+),
+bp_periods AS (
+    SELECT 'this_month' AS period,
+        DATEADD(day, 4, DATEADD(month, -1, bp_month_label))                                AS start_date,
+        LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE())                              AS end_date
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_month_mtd',
+        DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
+        DATEADD(day,
+            DATEDIFF(day, DATEADD(day,4,DATEADD(month,-1,bp_month_label)), LEAST(DATEADD(day,3,bp_month_label), CURRENT_DATE())),
+            DATEADD(day, 4, DATEADD(month, -2, bp_month_label)))
+    FROM current_bp
+    UNION ALL
+    SELECT 'this_week', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE() FROM current_bp
+    UNION ALL
+    SELECT 'last_week', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1 FROM current_bp
+)
+SELECT
+    p.period,
+    COALESCE(e.TEAM_NAME, 'Not Set') AS team,
+    COUNT(*) AS meetings_completed
+FROM bp_periods p
+JOIN FLEX.SALES.FCT_CRM_MEETING m
+    ON m.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date
+LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e
+    ON m.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+WHERE m.MEETING_TYPE = 'meeting' AND m.MEETING_STATUS = 'completed'
+  {{#Team.value}} AND e.TEAM_NAME = '{{Team.value}}' {{/Team.value}}
+GROUP BY 1, 2
+ORDER BY 1, 2;
