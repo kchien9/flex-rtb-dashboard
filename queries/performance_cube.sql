@@ -56,8 +56,15 @@
 -- for the Snowflake connector over raw Mustache substitution for every filter below; if only
 -- Mustache is available, double the apostrophes in the value before it reaches this query.
 --
--- All filterable dimensions (Team, MSP, Deal Type, Segment) are included so they can be
+-- All filterable dimensions (Team, Deal Type, Segment) are included so they can be
 -- layered together, not just whichever one is the current row grouping.
+-- NO MSP FILTER HERE -- fixed 2026-07-28. PARTNER_MANAGEMENT_SOFTWARE is a dirty
+-- deal-grain field (a single opportunity can span properties on different PMS systems,
+-- so real rows contain jammed multi-values like "365 Connect;AMC Rent Pay;RealPage" --
+-- confirmed live: ~4.8% of populated rows are multi-value, 75 distinct raw values total).
+-- This confirms the exact warning already in the README ("use PMS on the rolled-out-units
+-- table for MSP slicing instead") -- MSP slicing belongs on rolled_out_units_cube.sql
+-- (clean PMS field, 7 real values), never on this deal-grain query.
 --
 -- DSMB + SEGMENT BUCKET (fixed 2026-07-28 -- this was flagged as an open gap since the
 -- start of this repo and left unfixed for too long; Kevin caught it live in Superblocks
@@ -165,8 +172,7 @@ base AS (
 SELECT
     p.period,
     o.segment_bucket,
-    COALESCE(o.OPPORTUNITY_TYPE, 'Not Set')                        AS deal_type,
-    COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set')             AS msp,
+    o.OPPORTUNITY_TYPE                                             AS deal_type,
     COUNT(DISTINCT IFF(o.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date,
                        o.OPPORTUNITY_ID, NULL))                    AS pipeline_created,
     -- unit counts are the primary numbers -- this dashboard is about units, deal counts are
@@ -188,11 +194,15 @@ LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a
 LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
 WHERE (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   AND o.segment_bucket IS NOT NULL
+  -- Deal Type scope, confirmed with Kevin 2026-07-28: New Logo, Expansion, Move In only.
+  -- Real remaining volume (Uplevel variants, New Vertical, Add On, ILS, Product
+  -- Partnership, MSP) is small -- ~46K units / ~3.5% of closed-won volume, trailing 3mo --
+  -- excluded from this dashboard's scope, not deleted from the underlying table.
+  AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
   {{#Team.value}}     AND o.STATIC_TEAM_NAME = '{{Team.value}}'                {{/Team.value}}
-  {{#Msp.value}}       AND o.PARTNER_MANAGEMENT_SOFTWARE = '{{Msp.value}}'     {{/Msp.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}'          {{/DealType.value}}
   {{#Segment.value}}   AND o.segment_bucket = '{{Segment.value}}'             {{/Segment.value}}
-GROUP BY 1, 2, 3, 4
+GROUP BY 1, 2, 3
 ORDER BY 1, 2;
 
 -- Companion query: Meetings Completed (same bp_periods pattern, separate table). THIS is the
