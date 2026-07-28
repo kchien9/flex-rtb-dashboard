@@ -3,10 +3,13 @@
 -- exists yet for the rollout/recap/tier/MSP/segment flags. See docs/replatform-notes.md.
 --
 -- {{ Dimension.value }} is a Superblocks dropdown bound to a column name, so one query
--- drives every slice (PMS / HUBSPOT_DEAL_TYPE / HUBSPOT_COMPANY_SEGMENT /
--- HUBSPOT_STATIC_TEAM_NAME_DEAL / HUBSPOT_DEAL_OWNER). Constrain this dropdown's options to
--- exactly those 5 values in Superblocks -- it's a raw SQL identifier substitution, not a
--- value, so it can't be parameterized like the filters below. Never let it be free text.
+-- drives every slice (PMS / HUBSPOT_DEAL_TYPE / segment_bucket / HUBSPOT_STATIC_TEAM_NAME_DEAL
+-- / HUBSPOT_DEAL_OWNER). Constrain this dropdown's options to exactly those 5 values in
+-- Superblocks -- it's a raw SQL identifier substitution, not a value, so it can't be
+-- parameterized like the filters below. Never let it be free text.
+-- NOTE: segment_bucket replaced HUBSPOT_COMPANY_SEGMENT here 2026-07-28 -- that raw field is
+-- known-unreliable (see README's data quality gotchas); segment_bucket is the validated
+-- Strategic/MM+Ent/SMB/House Accounts mapping defined below.
 --
 -- FILTER ESCAPING -- READ BEFORE WIRING: real team names contain apostrophes
 -- ("Brandon's Team", "Cory's Team") which BREAK naive '{{Value}}' string interpolation --
@@ -34,6 +37,31 @@
 -- with current reality on ~13% of PMCs (267 of 2,011 tested), which matters for a dashboard
 -- that's supposed to reflect right-now, not whatever a HubSpot deal property said when it
 -- was last touched.
+--
+-- SEGMENT BUCKET (added 2026-07-28, confirmed with Kevin) -- Sham wants the primary grouping
+-- to be by SEGMENT (Strategic / MM+Ent / SMB / House Accounts), not raw pod name. Real pod
+-- names don't map 1:1 onto that -- some pod labels are STALE (Cory's Team: Cory used to
+-- manage a pod, he's now an individual contributor on Strategic Team; Heidi's Team: Heidi has
+-- left the company, Dana Finch runs that pod now -- also resolves oneonone_prep.sql's
+-- previously-unconfirmed Dana pod mapping) -- so this is a name-to-segment mapping, not a
+-- literal rename. Confirmed mapping (validated live against 3 months of real unit volume):
+--   MM/Ent          <- Brandon's Team
+--   Strategic       <- Strategic Team, Cory's Team, Heidi's Team
+--   SMB             <- SMB Account Executives, SMB Account Executives 1, SMB Account Executives 2
+--   House Accounts  <- House Accounts (Morgan Giles only, per Kevin -- one rep, kept as its
+--                      own segment anyway since Sham thinks of it as a distinct bucket)
+--   Not Set         <- HUBSPOT_STATIC_TEAM_NAME_DEAL IS NULL (2.4M units/3mo, real volume --
+--                      kept visible, not silently dropped, so Sham can see there's real
+--                      unattributed volume rather than have it vanish from the total)
+-- Everything else -- DSMB 1-5, Deep SMB *, DSMB Account Executive (External), Partner
+-- Success, Partner GTM, Channel Sales, all SDR-only pods, leadership-only pods (Strategic
+-- Team Leadership, House Accounts Leadership), and the tiny legacy "Historical
+-- MM/Enterprise"/"Historical Strategic" tags -- gets segment_bucket = NULL and is EXCLUDED
+-- entirely from this query's output (per Kevin: "we dont want dsmb or partner success...we
+-- do want sdrs but i think we can remove them for now too"). This is a different exclusion
+-- than the DSMB account-size filter above -- that one drops small ACCOUNTS regardless of who
+-- owns them; this one drops specific ORG PODS from the segment-level view regardless of
+-- account size. Both apply, independently.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -41,9 +69,23 @@ WITH pmc_size AS (
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
       AND IS_IN_NETWORK
     GROUP BY 1
+),
+base AS (
+    SELECT
+        s.*,
+        CASE
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IS NULL THEN 'Not Set'
+            ELSE NULL
+        END AS segment_bucket
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
 )
 SELECT
     DATE_TRUNC('month', s.BP_MONTH)                          AS bp_month,
+    s.segment_bucket,
     COALESCE({{ Dimension.value }}, 'Not Set')               AS slice,
     SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))          AS integrated_total_units,
     SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0))            AS new_integrated_units,
@@ -53,7 +95,7 @@ SELECT
             AND NOT s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0))   AS new_units,
     SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0))               AS deactivated_units,
     SUM(s.ROLLED_OUT_UNITS_MOM_CHANGE)                                  AS net_change_units
-FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+FROM base s
 LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
 -- LookbackMonths needs a Superblocks component default (e.g. 6) -- if this binding is ever
 -- empty, DATEADD(month, -, ...) is a syntax error, not a "no filter applied" no-op.
@@ -64,10 +106,12 @@ WHERE s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_M
   -- p.pmc_current_units IS NULL means the PMC has no in-network rows this month (e.g. fully
   -- deactivated) -- don't silently drop those, that's a different question than DSMB sizing.
   AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+  -- excluded org pods (DSMB/Partner Success/SDR/leadership/legacy) -- see header comment
+  AND s.segment_bucket IS NOT NULL
   {{#Team.value}}     AND s.HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{Team.value}}'      {{/Team.value}}
   {{#Msp.value}}       AND s.PMS = '{{Msp.value}}'                                {{/Msp.value}}
   {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE = '{{DealType.value}}'             {{/DealType.value}}
-  {{#Segment.value}}   AND s.HUBSPOT_COMPANY_SEGMENT = '{{Segment.value}}'        {{/Segment.value}}
+  {{#Segment.value}}   AND s.segment_bucket = '{{Segment.value}}'                 {{/Segment.value}}
   {{#Rep.value}}        AND s.HUBSPOT_DEAL_OWNER = '{{Rep.value}}'                {{/Rep.value}}
-GROUP BY 1, 2
-ORDER BY 1, 2;
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
