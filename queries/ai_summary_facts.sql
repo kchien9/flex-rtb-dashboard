@@ -117,3 +117,170 @@ WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MON
 GROUP BY 1
 ORDER BY 2 DESC
 LIMIT 3;
+
+-- ================================================================================
+-- Parts C-E added 2026-07-28 -- Kevin: "we need it to be intelligent... more than
+-- just x rep closed this deal." Parts A/B answer "what moved." These answer "is it
+-- real, is it explained, and is it part of a pattern" -- the difference between a
+-- shallow highlight and something that actually changes what Sham does next.
+--
+-- GRAIN NOTE: Parts C/D are deal-grain (FCT_CRM_OPPORTUNITY, closed-won), not the
+-- rolled-out-units grain Parts A/B use. Deliberate -- a "celebration" is naturally
+-- about a deal getting SIGNED, and funnel lag is inherently about the deal-creation
+-- -> deal-closed relationship, neither of which exists on the property-grain table.
+-- Same segment_bucket/team_bucket concept, recomputed here off STATIC_TEAM_NAME
+-- (the new table's field) instead of HUBSPOT_STATIC_TEAM_NAME_DEAL -- same two-
+-- taxonomy situation as everywhere else in this repo, not a new problem.
+-- NO MSP FILTER on Parts C/D -- deal-grain MSP is the same dirty field
+-- performance_cube.sql already dropped it for; don't reintroduce it here.
+-- ================================================================================
+
+-- Part C: biggest single deal in scope this period, AND what share of the scope's
+-- total it represents -- this is what separates "worth celebrating" from "just a
+-- number." A big deal that's 5% of the total is color; a big deal that's 60% of
+-- the total IS the story (the segment isn't up, one deal is).
+-- Validated live 2026-07-28, Strategic segment, this month: Connor Group Expansion,
+-- 14,420 units, 13.4% of Strategic's total -- notable but not dominant. Compare to
+-- Part B's Dana's-Team-by-rep example where one rep WAS ~60% -- different pattern,
+-- and the summary should describe them differently, not with the same template.
+WITH scoped AS (
+    SELECT
+        o.OPPORTUNITY_NAME, o.FLEX_UNIT_COUNT, o.CLOSED_AT_UTC,
+        CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN o.STATIC_TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN o.STATIC_TEAM_NAME IS NULL THEN 'Not Set'
+            ELSE NULL
+        END AS segment_bucket,
+        CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+      AND o.FLEX_UNIT_COUNT IS NOT NULL
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -1, CURRENT_DATE())
+      {{#Team.value}}     AND team_bucket = '{{Team.value}}'          {{/Team.value}}
+      {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
+      {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
+)
+SELECT
+    OPPORTUNITY_NAME AS deal,
+    FLEX_UNIT_COUNT AS units,
+    CLOSED_AT_UTC AS closed_date,
+    DIV0(FLEX_UNIT_COUNT, SUM(FLEX_UNIT_COUNT) OVER ()) AS share_of_scope_total
+FROM scoped
+ORDER BY FLEX_UNIT_COUNT DESC
+LIMIT 3;
+
+-- Part D: funnel lag -- was this period's closed-won number foreshadowed by pipeline
+-- created last period, or does it contradict what the funnel predicted? Per Kevin:
+-- "yes funnel lag is perfect." Uses BP-month as the lag unit (consistent with every
+-- other period comparison in this repo) -- not a rigorously validated "30-45 day"
+-- figure (unlike the 12-day close->rollout lag in units_closed_forecast_bridge.sql,
+-- which WAS validated), so this is directional context, not a precise model.
+-- Validated live 2026-07-28, company-wide: pipeline created ROSE 42% two periods ago
+-- (1,496 -> 2,126 deals) and closed-won FOLLOWED with a rise last period (386,301 ->
+-- 430,542 units) -- a real, visible lag relationship, not a coincidence.
+WITH current_bp AS (
+    SELECT IFF(DAY(CURRENT_DATE()) <= 4,
+               DATE_TRUNC('month', CURRENT_DATE()),
+               DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
+),
+bp_periods AS (
+    SELECT 'this_month' AS period,
+        DATEADD(day, 4, DATEADD(month, -1, bp_month_label)) AS start_date,
+        LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE()) AS end_date
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_month', DATEADD(day, 4, DATEADD(month, -2, bp_month_label)), DATEADD(day, 3, DATEADD(month, -1, bp_month_label)) FROM current_bp
+    UNION ALL
+    SELECT 'two_months_ago', DATEADD(day, 4, DATEADD(month, -3, bp_month_label)), DATEADD(day, 3, DATEADD(month, -2, bp_month_label)) FROM current_bp
+),
+scoped AS (
+    SELECT o.*,
+        CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN o.STATIC_TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN o.STATIC_TEAM_NAME IS NULL THEN 'Not Set'
+            ELSE NULL
+        END AS segment_bucket,
+        CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+      {{#Team.value}}     AND team_bucket = '{{Team.value}}'          {{/Team.value}}
+      {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
+      {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
+)
+SELECT
+    p.period,
+    COUNT(DISTINCT IFF(s.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date, s.OPPORTUNITY_ID, NULL)) AS pipeline_created_deals,
+    SUM(IFF(s.IS_CLOSED_WON AND s.CLOSED_AT_UTC BETWEEN p.start_date AND p.end_date, s.FLEX_UNIT_COUNT, 0)) AS closed_won_units
+FROM bp_periods p
+JOIN scoped s ON TRUE
+GROUP BY 1
+ORDER BY 1;
+
+-- Part E: mix-trend persistence -- Expansion share, how many consecutive months has
+-- it moved the SAME direction, and which direction right now. Per Kevin: "callouts
+-- like our trend l6m is too much towards expansion etc, reorient the team towards
+-- new logos" -- but only worth saying if it's an actual multi-month pattern, not a
+-- 1-month blip. Validated live 2026-07-28, company-wide: current streak is length 1,
+-- direction UP (Expansion share rose from 62% to 68% this month) -- following FOUR
+-- months of net decline before that. This is a reversal, not a trend -- the summary
+-- should say "reversed this month after declining most of this year," NOT "trending
+-- toward expansion for months," which the raw single-month number alone would wrongly
+-- imply if you only looked at the latest change.
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+base AS (
+    SELECT s.BP_MONTH, s.HUBSPOT_DEAL_TYPE, s.PROPERTY_UNIT_COUNT
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE s.IS_NEW_ROLLOUT AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      AND s.BP_MONTH >= DATEADD(month, -8, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      {{#Team.value}} AND s.HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{Team.value}}' {{/Team.value}}
+),
+monthly AS (
+    SELECT BP_MONTH, DIV0(SUM(IFF(HUBSPOT_DEAL_TYPE = 'Expansion', PROPERTY_UNIT_COUNT, 0)), SUM(PROPERTY_UNIT_COUNT)) AS expansion_share
+    FROM base GROUP BY 1
+),
+with_change AS (
+    SELECT BP_MONTH, expansion_share,
+        SIGN(expansion_share - LAG(expansion_share) OVER (ORDER BY BP_MONTH)) AS chg_sign
+    FROM monthly
+),
+with_lag AS (
+    SELECT *, LAG(chg_sign) OVER (ORDER BY BP_MONTH) AS prev_sign
+    FROM with_change
+    WHERE chg_sign IS NOT NULL
+),
+with_group AS (
+    SELECT *,
+        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (ORDER BY BP_MONTH) AS grp
+    FROM with_lag
+)
+SELECT
+    (SELECT expansion_share FROM monthly ORDER BY BP_MONTH DESC LIMIT 1) AS current_expansion_share,
+    MAX(chg_sign) AS current_direction,
+    COUNT(*) AS streak_length_months
+FROM with_group
+WHERE grp = (SELECT MAX(grp) FROM with_group);
