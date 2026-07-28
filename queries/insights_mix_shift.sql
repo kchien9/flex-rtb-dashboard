@@ -30,6 +30,16 @@
 -- DSMB EXCLUSION -- same pmc_size CTE pattern as rolled_out_units_cube.sql (current live PMC
 -- unit total <=750, not segment label, not team ownership). See that file's header for the
 -- full rationale.
+--
+-- TARGET-MSP SHARE + TEAM FILTER (added 2026-07-28) -- Kevin: "we dropped a team spiff to
+-- push the team more towards RealPage -- did the spiff do its job?" Answering that needs a
+-- specific MSP's share over time for a specific team, not just whichever MSP happens to be
+-- #1 overall. {{ TargetMsp.value }} (default 'RealPage') adds that as its own column
+-- alongside top_msp_share, and the Team filter now uses team_bucket (Brandon's/Rory's/
+-- Sebastian's/Dana's Team) instead of the raw pod field, consistent with every other filter
+-- in this repo. NOTE: the actual spiff START DATE is not in Snowflake anywhere -- that's
+-- knowledge only Kevin has. Superblocks should let him mark that date on the trend chart
+-- (a vertical line/annotation), this query just supplies the trend to annotate.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -38,20 +48,31 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-base AS (
+base_raw AS (
     SELECT
         s.BP_MONTH,
         s.HUBSPOT_DEAL_TYPE,
         s.PMS,
         s.PROPERTY_UNIT_COUNT,
         (s.IS_RECAPTURED_OTHER OR s.IS_RECAPTURED_NEW_ROLLOUT
-         OR s.IS_NON_INTEGRATED_RECAPTURED_OTHER OR s.IS_NON_INTEGRATED_RECAPTURED_NEW_ROLLOUT) AS is_recapture
+         OR s.IS_NON_INTEGRATED_RECAPTURED_OTHER OR s.IS_NON_INTEGRATED_RECAPTURED_NEW_ROLLOUT) AS is_recapture,
+        CASE
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE s.IS_NEW_ROLLOUT
       AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
       AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-      {{#Team.value}}    AND s.HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{Team.value}}' {{/Team.value}}
+),
+base AS (
+    SELECT * FROM base_raw
+    WHERE 1=1
+    {{#Team.value}}    AND team_bucket = '{{Team.value}}' {{/Team.value}}
 ),
 msp_by_month AS (
     SELECT BP_MONTH, PMS, SUM(PROPERTY_UNIT_COUNT) AS msp_units
@@ -63,6 +84,15 @@ top_msp_per_month AS (
     SELECT BP_MONTH, PMS AS top_msp, msp_units AS top_msp_units
     FROM msp_by_month
     QUALIFY msp_units = MAX(msp_units) OVER (PARTITION BY BP_MONTH)
+),
+target_msp_by_month AS (
+    -- separate CTE, same fan-out-avoidance reason as top_msp_per_month -- one row per
+    -- BP_MONTH before joining back to `base`, never join a per-PMS aggregate to the detail
+    -- table on BP_MONTH alone.
+    SELECT BP_MONTH, SUM(PROPERTY_UNIT_COUNT) AS target_msp_units
+    FROM base
+    WHERE PMS = '{{ TargetMsp.value }}'
+    GROUP BY 1
 )
 SELECT
     b.BP_MONTH,
@@ -71,8 +101,11 @@ SELECT
          SUM(b.PROPERTY_UNIT_COUNT))                                                     AS expansion_share,
     DIV0(SUM(IFF(b.is_recapture, b.PROPERTY_UNIT_COUNT, 0)), SUM(b.PROPERTY_UNIT_COUNT))  AS recapture_share,
     MAX(t.top_msp)                                                                        AS top_msp,
-    DIV0(MAX(t.top_msp_units), SUM(b.PROPERTY_UNIT_COUNT))                                AS top_msp_share
+    DIV0(MAX(t.top_msp_units), SUM(b.PROPERTY_UNIT_COUNT))                                AS top_msp_share,
+    '{{ TargetMsp.value }}'                                                                AS target_msp,
+    DIV0(MAX(tm.target_msp_units), SUM(b.PROPERTY_UNIT_COUNT))                            AS target_msp_share
 FROM base b
 JOIN top_msp_per_month t ON b.BP_MONTH = t.BP_MONTH
+LEFT JOIN target_msp_by_month tm ON b.BP_MONTH = tm.BP_MONTH
 GROUP BY 1
 ORDER BY 1;
