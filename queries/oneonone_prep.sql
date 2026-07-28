@@ -17,7 +17,8 @@
 -- a pod-level label (personalized for some managers -- "Brandon's Team" -- generic for
 -- others -- "SMB Account Executives 1/2") that IS the team grouping key, no roster needed.
 -- Confirmed with Kevin: SMB Account Executives 1 = Sebastian Bohlmann's pod, SMB Account
--- Executives 2 = Rory Averett's pod. Dana's and Hans's pod names still need confirming
+-- Executives 2 = Rory Averett's pod. Dana Finch = "Heidi's Team" (stale label -- Heidi has
+-- left, Dana runs it now, confirmed 2026-07-28). Hans's pod name still needs confirming
 -- (Hans manages SDRs -- activity-side tables, not this units-side query, separately).
 --
 -- DEPARTURE / REASSIGNMENT DETECTION -- the actual reason this matters: a team's number can
@@ -70,10 +71,12 @@ FROM (
 LEFT JOIN FLEX.STG_SALESFORCE.STG_SALESFORCE__USER u ON u.FULL_NAME = r.rep
 ORDER BY r.units_this - r.units_last ASC;
 
--- Pod name reference (confirmed with Kevin 2026-07-27, Hans/Dana still open):
+-- Pod name reference (confirmed with Kevin 2026-07-27, Dana resolved 2026-07-28, Hans still open):
 --   Brandon Nicastro -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "Brandon's Team"
 --   Rory Averett     -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "SMB Account Executives 2"
 --   Sebastian Bohlmann -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "SMB Account Executives 1"
---   Dana Finch       -> not yet confirmed, doesn't appear in Rippling_Raw either
+--   Dana Finch       -> HUBSPOT_STATIC_TEAM_NAME_DEAL = "Heidi's Team" -- STALE POD LABEL:
+--     Heidi (the prior manager) has left the company; Dana runs this pod now. The field
+--     itself still says "Heidi's Team" -- don't expect it to say "Dana's Team," it won't.
 --   Hans Bredahl     -> SDR org, needs FCT_CRM_TASK/FCT_CRM_MEETING (activity), not this
 --     units-side query at all
