@@ -38,6 +38,13 @@ lower priority — built and committed, but not blocking this week's work.**
 | `queries/units_closed_forecast_bridge.sql` | "Units closed, awaiting rollout" forward-looking context | Validated median close->rollout lag: 12 days |
 | `queries/opportunity_drilldown.sql` | Bottom of every drill chain — the actual deals behind any unit slice | Aggregated to opportunity grain via `FCT_CRM_OPPORTUNITY_LINE_ITEM`; ties out to `rep_leaderboard.sql` (validated) |
 | `queries/rep_leaderboard.sql` | Rep-level ranked view — on-demand, not default | Sham manages managers by default, but wanted rep-level access available; wire as a drill-through, not a headline panel |
+| `queries/activity_cube.sql` | Calls/Emails/Meetings/Demos, by rep and period | Calls/Emails via `FCT_CRM_TASK`, Demos via `MEETING_SUBTYPE = 'Sales \| Demo'`; caught a real join-fan-out bug building this, see file header |
+| `queries/pipeline_forecast.sql` | "The Road Ahead" — open pipeline by expected go-live month | Deliberately unweighted (no stage win-rate data to weight against yet — see `project_pipeline_win_rates.md`); real coverage gap on team attribution, flagged in file |
+| `queries/insights_activity_to_outcome.sql` | Rep-level meeting pacing + New Logo meetings-vs-units trend | Meeting→opportunity attribution is approximate (same-account, ±45 days) — stated plainly, not hidden |
+
+**Two open items blocking full build-out of the newest features — need Kevin's input, can't get these from Snowflake:**
+1. **Spiff/intervention dates** (e.g. "we dropped a team spiff to push toward RealPage") aren't in Snowflake anywhere — `insights_mix_shift.sql`'s trend needs a manual annotation for when an intervention started, supplied by Kevin, not derived from data.
+2. **Quota/target numbers** ("are we gonna hit our number") — no quota/target field found in any table checked so far. Needs Kevin to say where these live (comp config workbook? a Salesforce field? somewhere else?) before a pacing-to-goal view can be built.
 
 ### Paused — lower priority, committed but not blocking
 
