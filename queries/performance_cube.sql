@@ -166,12 +166,24 @@ base AS (
             WHEN o.STATIC_TEAM_NAME = 'House Accounts' THEN 'House Accounts'
             WHEN o.STATIC_TEAM_NAME IS NULL THEN 'Not Set'
             ELSE NULL
-        END AS segment_bucket
+        END AS segment_bucket,
+        -- team_bucket: NARROWER than segment_bucket, scoped to exactly Sham's 4 units-side
+        -- direct-report managers (Brandon/Rory/Sebastian/Dana). House Accounts and Not Set
+        -- are valid segment_bucket values but NOT valid team_bucket values -- no manager
+        -- owns them. See rolled_out_units_cube.sql's header for the full rationale.
+        CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
 )
 SELECT
     p.period,
     o.segment_bucket,
+    o.team_bucket,
     o.OPPORTUNITY_TYPE                                             AS deal_type,
     COUNT(DISTINCT IFF(o.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date,
                        o.OPPORTUNITY_ID, NULL))                    AS pipeline_created,
@@ -199,10 +211,10 @@ WHERE (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   -- Partnership, MSP) is small -- ~46K units / ~3.5% of closed-won volume, trailing 3mo --
   -- excluded from this dashboard's scope, not deleted from the underlying table.
   AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
-  {{#Team.value}}     AND o.STATIC_TEAM_NAME = '{{Team.value}}'                {{/Team.value}}
+  {{#Team.value}}     AND o.team_bucket = '{{Team.value}}'                    {{/Team.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}'          {{/DealType.value}}
   {{#Segment.value}}   AND o.segment_bucket = '{{Segment.value}}'             {{/Segment.value}}
-GROUP BY 1, 2, 3
+GROUP BY 1, 2, 3, 4
 ORDER BY 1, 2;
 
 -- Companion query: Meetings Completed (same bp_periods pattern, separate table). THIS is the
@@ -250,6 +262,20 @@ bp_periods AS (
 SELECT
     p.period,
     COALESCE(e.TEAM_NAME, 'Not Set') AS team,
+    -- same team_bucket mapping as the main query above, so the ONE Team filter component
+    -- works consistently across this whole page. CAVEAT (real, not theoretical):
+    -- DIM_EMPLOYEE_HISTORY.TEAM_NAME has data quality problems the deal-grain field
+    -- doesn't -- confirmed live, Dana Finch shows up under "Enterprise AE Manager" here,
+    -- not a clean pod name, so filtering Meetings to "Dana's Team" may undercount her
+    -- team's actual meetings. Flagging, not silently fixing -- there's no clean field to
+    -- fall back to on the activity side yet.
+    CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+        ELSE NULL
+    END AS team_bucket,
     COUNT(*) AS meetings_completed
 FROM bp_periods p
 JOIN FLEX.SALES.FCT_CRM_MEETING m
@@ -257,6 +283,12 @@ JOIN FLEX.SALES.FCT_CRM_MEETING m
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e
     ON m.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
 WHERE m.MEETING_TYPE = 'meeting' AND m.MEETING_STATUS = 'completed'
-  {{#Team.value}} AND e.TEAM_NAME = '{{Team.value}}' {{/Team.value}}
-GROUP BY 1, 2
+  {{#Team.value}} AND CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+        ELSE NULL
+    END = '{{Team.value}}' {{/Team.value}}
+GROUP BY 1, 2, 3
 ORDER BY 1, 2;
