@@ -105,6 +105,64 @@ A→Part B pattern:
   `Team.value`, which Part B (rep-level breakdown) is already filtered on directly — no
   intermediate step needed.
 
+## 4.5. AI Summary — scope and priority (referenced by `ai_summary_facts.sql`, written down 2026-07-29)
+
+**Sham's actual driving question, in his own frame (Kevin, 2026-07-29): "are things going well
+— why? or are things slipping — why? Those are the driving questions behind this dashboard for
+him. If certain deals get snagged, he doesn't need to know — that's not his job, maybe that's
+the AE managers' job (who report to Sham). He's more big picture since he oversees the whole
+sales org."** Every decision below follows from this. This is a summary FOR the person who
+oversees Brandon/Rory/Sebastian/Dana, not a summary for one of them.
+
+**Facts available** (`ai_summary_facts.sql`, same filter surface as the page it sits on):
+- Part A — headline this-vs-last, whatever's currently filtered.
+- Part B — top 3 rep drivers within that filter, with % of total (is the move broad-based or
+  1-2 people carrying it).
+- Part C — biggest single deal this period + its share of the scope total (is a big number one
+  whale deal or real breadth).
+- Part D — funnel lag (pipeline created 1-2 periods ago vs. closed-won this period).
+- Part E — Expansion-share mix trend, with streak length (a 1-month blip vs. a real multi-month
+  pattern — see the file's header, this already burned once: a single-month reversal was
+  initially at risk of being described as "trending toward Expansion for months").
+- Part F — calls/meetings trend (added 2026-07-29) — the activity leading indicator for a
+  future unit move, not just a description of the past.
+- Watch List (`watchlist_large_deals_at_risk.sql`) — deal-level risk detail. NOT one of the
+  "facts" this summary narrates from in detail — see below.
+
+**Priority order for the narration (top of the summary to bottom):**
+1. **The headline direction + the ONE explanatory fact that actually explains it.** Pick
+   whichever of Part B (concentration), Part E (mix shift), or Part F (activity leading
+   indicator) best explains Part A's move — don't stack all three if only one is actually the
+   story. "Units are down 18% this month, driven almost entirely by a 47% drop in Expansion
+   share" beats a sentence that also drags in an unrelated rep-concentration stat that isn't
+   the real explanation.
+2. **Breadth check** — is this one account/rep or a broad pattern (Part B/C answer this).
+   Broad-based moves are more org-level-relevant than a single account's fluke; say so
+   explicitly either way.
+3. **Forward-looking flag, QUANTIFIED ONLY, never deal-level** — "N deals worth $X units are
+   flagged at risk this period" is a fine, org-relevant closing line (it tells Sham the
+   *category* exists and roughly how big). Naming the specific deal, account, or failure reason
+   ("BH Management's July BP Implementation, marked Failed to Rollout due to a duplicate
+   property") does NOT belong here — that's exactly the "certain deal got snagged" detail
+   that's an AE manager's job to know, not Sham's. That level of detail lives on the Watch List
+   tab where a manager drills in, not in the headline summary. If the LLM prompt currently
+   passes individual Watch List rows to the model at all, stop passing them here -- pass only
+   an aggregate count/sum.
+4. **Never let a data-hygiene artifact read as a business signal.** A "Failed to Roll Out"
+   reason of "duplicate property already active" is an operational data-quality issue, not a
+   sales-execution one — if Watch List detail ever does surface in a summary elsewhere, gate
+   out administrative failure reasons from ever being cited as if they were a customer/deal
+   risk. (Applies to Watch List's own display too, not just this summary — consider visually
+   distinguishing "administrative/data" flags from "real deal risk" flags there.)
+
+**What this means concretely for the prompt/LLM layer**: the system prompt should say something
+like "You are summarizing sales performance for the VP who oversees the whole org, not one
+team. Never name an individual deal, account, or rep-level failure reason. You may cite a rep
+by name ONLY as an explanation for a broad trend (Part B), never as a standalone callout. Close
+with a single quantified at-risk-pipeline line if material, with no deal specifics." This is a
+presentation-layer instruction, not something `ai_summary_facts.sql` enforces — the query
+returns the facts, the prompt is responsible for scope discipline.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
