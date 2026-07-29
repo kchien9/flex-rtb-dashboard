@@ -28,9 +28,29 @@
 -- "active pipeline" number, raise RecencyMonths' default rather than reverting to
 -- UPDATED_AT_UTC, which is proven not to reflect real engagement at all.
 --
--- Excludes segment_bucket = NULL (DSMB/Partner/SDR/leadership pods), same as every other
--- query in this repo -- confirmed live this bucket alone carries 1,148 open opps / 2.19M
--- units, real volume that shouldn't get silently folded into a real segment's count.
+-- TEAM ATTRIBUTION -- REBUILT 2026-07-29, STATIC_TEAM_NAME IS A BATCH-LAGGED FIELD ON OPEN
+-- DEALS. Kevin: "im not sure the rolled out units by segment is right" led into checking why
+-- segmenting OPEN pipeline by STATIC_TEAM_NAME put almost everything into "Not Set." Confirmed
+-- live: STATIC_TEAM_NAME's attribution rate tracks deal AGE almost perfectly, not deal stage --
+-- <30 days old: 0.1% attributed, 30-90 days: 0%, 90-365 days: 61%, >365 days: 98.7% -- and
+-- "Not Set" deals progress through Qualification->Negotiation at the same rate as attributed
+-- ones (ruling out "gets assigned once qualified" as the mechanism). It's a batch/ETL
+-- snapshot field that hasn't caught up on anything created in roughly the last year -- which
+-- is most of what "open pipeline" actually is. FIX: attribute via the deal's live OWNER_SK ->
+-- DIM_EMPLOYEE_HISTORY.TEAM_NAME instead (same fix pipeline_forecast.sql already uses for the
+-- same reason). Confirmed live this resolves cleanly -- OWNER_SK on open deals mostly matches
+-- HubSpot-sourced employee records (80%), not Salesforce-sourced (20%, the opposite of the
+-- activity-table pattern used elsewhere in this repo) -- so this join deliberately does NOT
+-- restrict to SOURCE_SYSTEM='salesforce' the way the rep-listing fixes elsewhere do; it only
+-- needs IS_CURRENT=TRUE and matches on OWNER_SK's exact EMPLOYEE_SK value directly (no EMAIL/
+-- FULL_NAME fan-out risk since that's a precise 1:1 key match, not a name-based join). Real
+-- distribution after the fix: MM/Ent 1,059 opps/$4.85M, Strategic 591/$3.75M, SMB 6,250/$2.99M,
+-- only 17 opps genuinely unowned ("Not Set").
+--
+-- Excludes segment_bucket = NULL (DSMB/Partner/SDR/leadership pods -- 2,794 opps/$3.6M,
+-- real volume that shouldn't get silently folded into a real segment's count, same principle
+-- as everywhere else in this repo, just now measured via the live owner instead of the stale
+-- deal-time field).
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
 
@@ -45,25 +65,26 @@ WITH last_activity AS (
 )
 SELECT
     CASE
-        WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-        WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-        WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-        WHEN o.STATIC_TEAM_NAME = 'House Accounts' THEN 'House Accounts'
-        WHEN o.STATIC_TEAM_NAME IS NULL THEN 'Not Set'
+        WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+        WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+        WHEN d.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+        WHEN d.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+        WHEN d.TEAM_NAME IS NULL THEN 'Not Set'
         ELSE NULL
     END                                AS segment_bucket,
     COUNT(*)                           AS open_opportunities,
     SUM(o.FLEX_UNIT_COUNT)             AS open_pipeline_units
 FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.IS_CURRENT = TRUE
 LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
 WHERE NOT o.IS_CLOSED
   AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
   AND CASE
-        WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-        WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-        WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-        WHEN o.STATIC_TEAM_NAME = 'House Accounts' THEN 'House Accounts'
-        WHEN o.STATIC_TEAM_NAME IS NULL THEN 'Not Set'
+        WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+        WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+        WHEN d.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+        WHEN d.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+        WHEN d.TEAM_NAME IS NULL THEN 'Not Set'
         ELSE NULL
     END IS NOT NULL
   {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
