@@ -70,7 +70,18 @@ SELECT
     SUM(li.UNIT_COUNT)                                 AS units,
     COUNT(DISTINCT li.PROPERTY_ID)                     AS properties,
     o.CLOSED_AT_UTC                                    AS closed_date,
-    o.OPPORTUNITY_ID                                   AS opportunity_id
+    o.OPPORTUNITY_ID                                   AS opportunity_id,
+    -- Salesforce domain confirmed by Kevin 2026-07-29: getflex.lightning.force.com. Gated on
+    -- the ID format -- this table blends Salesforce-native (18-char "006..." IDs) and
+    -- HubSpot-origin (plain numeric) records same as open opportunities do (see
+    -- open_opportunities_drilldown.sql's header) -- a numeric ID was never a Salesforce record,
+    -- so the link must be NULL there, not a guaranteed-broken URL. Unlike the open-pipeline
+    -- queries, legacy-ID rows are NOT excluded here -- these are already-closed, already-
+    -- rolling-out deals (real revenue), not stale leads, so a HubSpot-origin ID just means the
+    -- deal was created before the Salesforce migration, not that it isn't real.
+    IFF(o.OPPORTUNITY_ID LIKE '006%',
+        'https://getflex.lightning.force.com/lightning/r/Opportunity/' || o.OPPORTUNITY_ID || '/view',
+        NULL) AS salesforce_url
 FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
 JOIN team_map m ON li.OWNER_SK = m.EMPLOYEE_SK
 LEFT JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
@@ -79,5 +90,5 @@ WHERE li.ROLLOUT_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MA
   {{#Team.value}}      AND m.team_bucket = '{{Team.value}}' {{/Team.value}}
   {{#BpMonth.value}}   AND li.ROLLOUT_MONTH = '{{BpMonth.value}}' {{/BpMonth.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
-GROUP BY 1, 2, 3, 4, 5, 6, 9, 10
+GROUP BY 1, 2, 3, 4, 5, 6, 9, 10, 11
 ORDER BY units DESC;

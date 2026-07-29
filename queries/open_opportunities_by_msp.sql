@@ -23,6 +23,11 @@
 -- batch-lagged STATIC_TEAM_NAME) -- MSP is a second cut on the SAME underlying open-pipeline
 -- population, so it inherits the same base filters for consistency between the two views.
 --
+-- LEGACY HUBSPOT-ORIGIN RECORDS EXCLUDED (added 2026-07-29) -- same fix as
+-- open_opportunities_by_segment.sql, see open_opportunities_drilldown.sql's header for the
+-- full writeup. `OPPORTUNITY_ID LIKE '006%'` added directly rather than relying on the
+-- staleness filter alone to catch every legacy record.
+--
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo (not currently an
 -- issue for MSP values, but {{Segment.value}}/{{DealType.value}} below still carry it).
 
@@ -43,6 +48,7 @@ FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.IS_CURRENT = TRUE
 LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
 WHERE NOT o.IS_CLOSED
+  AND o.OPPORTUNITY_ID LIKE '006%'
   AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
   AND CASE
         WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'

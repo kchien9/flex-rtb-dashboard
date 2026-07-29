@@ -52,6 +52,23 @@
 -- as everywhere else in this repo, just now measured via the live owner instead of the stale
 -- deal-time field).
 --
+-- LEGACY HUBSPOT-ORIGIN RECORDS EXCLUDED (added 2026-07-29) -- see
+-- open_opportunities_drilldown.sql's header for the full writeup: FCT_CRM_OPPORTUNITY blends
+-- Salesforce-native opportunities (real 18-char "006..." IDs) with HubSpot-origin ones (plain
+-- numeric IDs that were never a Salesforce record at all -- confirmed live this is the exact
+-- cause of a "record no longer available" bug Kevin hit). Kevin, once this was explained:
+-- "yea old open hubspot opportunities lets exclude. we migrated to sf over a year ago and
+-- these i think are basically dead opportunities." The staleness filter above catches MOST of
+-- these already (median age 431 days, 99.9% zero real activity), but not all -- some pass
+-- because their ACCOUNT has unrelated recent activity from a different, real opportunity. The
+-- explicit `OPPORTUNITY_ID LIKE '006%'` filter below closes that gap directly rather than
+-- relying on the staleness heuristic alone.
+--
+-- DEAL TYPE BREAKDOWN (added 2026-07-29) -- Kevin: "can open opportunities show stacked
+-- breakdown for new logo vs expansion type opportunity." `deal_type` is now a group-by column
+-- so Superblocks can stack New Logo vs Expansion (vs whatever else) within each segment bar --
+-- the existing {{DealType.value}} filter still works for narrowing to one type if needed.
+--
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
 
 WITH last_activity AS (
@@ -72,12 +89,14 @@ SELECT
         WHEN d.TEAM_NAME IS NULL THEN 'Not Set'
         ELSE NULL
     END                                AS segment_bucket,
+    o.OPPORTUNITY_TYPE                 AS deal_type,
     COUNT(*)                           AS open_opportunities,
     SUM(o.FLEX_UNIT_COUNT)             AS open_pipeline_units
 FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.IS_CURRENT = TRUE
 LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
 WHERE NOT o.IS_CLOSED
+  AND o.OPPORTUNITY_ID LIKE '006%'
   AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
   AND CASE
         WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
@@ -88,5 +107,5 @@ WHERE NOT o.IS_CLOSED
         ELSE NULL
     END IS NOT NULL
   {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
-GROUP BY 1
-ORDER BY 3 DESC;
+GROUP BY 1, 2
+ORDER BY 4 DESC;

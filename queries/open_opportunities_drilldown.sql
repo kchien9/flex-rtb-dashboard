@@ -38,10 +38,10 @@
 -- not a join bug) -- surfaced via is_legacy_no_sf_record below so the UI can show "no
 -- Salesforce record" instead of a blank that looks like a data gap.
 --
--- SALESFORCE DEEP LINK -- only build a clickable link when is_legacy_no_sf_record = FALSE.
--- Linking a HubSpot-origin numeric ID as if it were a Salesforce ID is exactly the bug that
--- surfaced this whole investigation -- gate the link on this flag, don't just always render one.
--- Salesforce domain still not provided by Kevin (open item from earlier in this repo's history).
+-- SALESFORCE DEEP LINK -- domain confirmed by Kevin 2026-07-29: getflex.lightning.force.com.
+-- `salesforce_url` is built directly below using the standard Lightning record-page pattern.
+-- Every row here already has a real 006-prefix ID (legacy HubSpot-origin rows are excluded
+-- entirely, see below) so the URL is always valid -- no per-row gating needed anymore.
 --
 -- LEGACY RECORDS EXCLUDED BY DEFAULT -- checked live: the account-level staleness filter alone
 -- isn't enough to catch every legacy record -- Greystar/MJ Oommen still passed it, because
@@ -86,13 +86,12 @@ SELECT
     o.OPPORTUNITY_TYPE                                    AS deal_type,
     o.FLEX_UNIT_COUNT                                     AS units,
     DATEDIFF(day, o.CREATED_AT_UTC, CURRENT_DATE())       AS days_open,
-    NOT (o.OPPORTUNITY_ID LIKE '006%')                    AS is_legacy_no_sf_record,
     sfo.OPPORTUNITY_NOTES__C                              AS opportunity_notes,
     sfo.NEXTSTEP                                          AS next_step,
     sfo.NEXT_STEP_DATE__C                                 AS next_step_date,
     sfo.DATA_QUALITY_SCORE__C                              AS data_quality_score,
-    IFF(o.OPPORTUNITY_ID LIKE '006%', o.OPPORTUNITY_ID, NULL) AS salesforce_id,
     o.OPPORTUNITY_ID                                      AS opportunity_id,
+    'https://getflex.lightning.force.com/lightning/r/Opportunity/' || o.OPPORTUNITY_ID || '/view' AS salesforce_url,
     CASE
         WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
         WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
