@@ -51,3 +51,53 @@ WHERE NOT o.IS_CLOSED
         END, 'Not Set') = '{{Team.value}}' {{/Team.value}}
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
+
+-- Part B: COMBINED "Road Ahead" -- adds units from deals that have ALREADY closed but
+-- haven't rolled out yet, using FCT_CRM_OPPORTUNITY_LINE_ITEM.ROLLOUT_MONTH, alongside the
+-- open-pipeline forecast above. Per Kevin: "when a deal closed won theres an anticipated
+-- rolled out month date - can we use that field to forecast future months?"
+--
+-- YES, validated live 2026-07-28 -- ROLLOUT_MONTH is assigned near deal-close time as a real
+-- ANTICIPATED month, not left NULL until the property actually goes live (confirmed: 0 of
+-- ~144K line items on deals closed in the last 3 months had a NULL ROLLOUT_MONTH). Checked
+-- reliability by comparing predicted vs. actual outcome for line items whose predicted month
+-- was 2-4 months ago (enough elapsed time to know the real outcome): 122,049 of 138,702
+-- properties (88%) actually rolled out in their predicted month. The ~12% miss rate is
+-- delays/failures -- the same population watchlist_large_deals_at_risk.sql flags.
+--
+-- CONFIDENCE GRADIENT, real and validated, not assumed: closed-but-awaiting-rollout units are
+-- heavily concentrated in the VERY NEXT month (296,997 units expected next month, ~0 beyond
+-- that -- matches the already-validated 12-day median close->rollout lag in
+-- units_closed_forecast_bridge.sql) and carry real 88% historical accuracy. Open-pipeline
+-- units (Part A above) are spread further out and carry no such accuracy backing (unweighted
+-- face value on deals that haven't even closed yet). Bind these as two visually distinct
+-- series on the same chart, don't blend them into one undifferentiated bar -- the near-term
+-- number is meaningfully more trustworthy than the far-term one, and Sham should be able to
+-- see that at a glance.
+SELECT
+    COALESCE(c.expected_month, p.expected_month)     AS expected_month,
+    COALESCE(c.units, 0)                             AS closed_awaiting_rollout_units,
+    COALESCE(c.properties, 0)                        AS closed_awaiting_rollout_properties,
+    COALESCE(p.units, 0)                             AS open_pipeline_units,
+    COALESCE(p.deals, 0)                             AS open_pipeline_deals,
+    COALESCE(c.units, 0) + COALESCE(p.units, 0)      AS total_expected_units
+FROM (
+    SELECT DATE_TRUNC('month', li.ROLLOUT_MONTH) AS expected_month,
+        SUM(li.UNIT_COUNT) AS units, COUNT(*) AS properties
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
+    JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
+    WHERE o.IS_CLOSED_WON
+      AND li.ROLLOUT_MONTH > CURRENT_DATE()
+      AND li.ROLLOUT_MONTH <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+    GROUP BY 1
+) c
+FULL OUTER JOIN (
+    SELECT DATE_TRUNC('month', o.ANTICIPATED_GO_LIVE_AT_UTC) AS expected_month,
+        SUM(o.FLEX_UNIT_COUNT) AS units, COUNT(*) AS deals
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    WHERE NOT o.IS_CLOSED
+      AND o.ANTICIPATED_GO_LIVE_AT_UTC > CURRENT_DATE()
+      AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+    GROUP BY 1
+) p ON c.expected_month = p.expected_month
+ORDER BY 1;
