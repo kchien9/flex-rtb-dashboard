@@ -40,6 +40,10 @@
 -- -- a naive join on FULL_NAME would non-deterministically match either one. Deduped via
 -- QUALIFY, preferring the active row (or the more recently logged-in row if both are
 -- inactive) before joining.
+--
+-- SEGMENT/MSP FILTERS (added 2026-07-28) -- feeds the "drill into segment to see rep" ask on
+-- the Segment x MSP x Month matrix view (rolled_out_units_cube.sql with Dimension=PMS). PMS
+-- is already available via s.* from PROPERTY_BP_MONTH_STATS, no join needed.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -94,7 +98,9 @@ WHERE s.BP_MONTH >= DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANA
   -- departure grace period: keep if no user record match (don't punish a join miss), OR
   -- currently active, OR inactive but logged in within the grace window
   AND (u.FULL_NAME IS NULL OR u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
-  {{#Team.value}} AND s.team_bucket = '{{Team.value}}' {{/Team.value}}
+  {{#Team.value}}     AND s.team_bucket = '{{Team.value}}'       {{/Team.value}}
+  {{#Segment.value}}  AND s.segment_bucket = '{{Segment.value}}' {{/Segment.value}}
+  {{#Msp.value}}       AND s.PMS = '{{Msp.value}}'                {{/Msp.value}}
 GROUP BY 1, 2, 3, 4
 HAVING units_this > 0 OR units_last > 0
 ORDER BY units_this DESC;
