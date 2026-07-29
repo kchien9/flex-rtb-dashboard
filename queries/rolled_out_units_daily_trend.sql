@@ -5,25 +5,42 @@
 -- deactivation date on PROPERTY_BP_MONTH_STATS, only a BP-month IS_DEACTIVATED flag with no
 -- date attached to it. So a true daily "net change" (adds minus deactivations) genuinely can't
 -- be built at day grain -- deactivation timing just isn't tracked that precisely. This shows
--- daily GROSS new rollouts (ROLLOUT_DATE) -- real, validated day-level data (see
--- rolled_out_units_headline.sql's header for the discovery) -- and a running cumulative sum of
--- those gross adds WITHIN the lookback window, not a reconstruction of total network stock.
--- Don't bind `cumulative_new_units` to anything that implies "total units in the network" --
--- for that, use rolled_out_units_cube.sql's integrated_total_units (the real stock, BP-month
--- grain). This is "how many NEW units have rolled out since the window started," which is a
--- different, narrower question.
+-- daily GROSS new + recaptured rollouts (ROLLOUT_DATE) -- real, validated day-level data (see
+-- rolled_out_units_headline.sql's header for the discovery) -- and a running cumulative sum
+-- WITHIN the lookback window, not a reconstruction of total network stock. Don't bind
+-- `cumulative_units` to anything that implies "total units in the network" -- for that, use
+-- rolled_out_units_cube.sql's integrated_total_units (the real stock, BP-month grain). This is
+-- "how many units have rolled out since the window started," a different, narrower question.
+--
+-- NEW vs. RECAPTURED SPLIT (added 2026-07-29) -- Kevin wants this as a stacked bar. Checked
+-- live before building it: IS_NEW_INTEGRATED and (IS_RECAPTURED_NEW_ROLLOUT OR
+-- IS_RECAPTURED_OTHER) are CLEANLY DISJOINT (confirmed live, zero overlap) -- safe to stack
+-- without double-counting. Deliberately did NOT use IS_NEW_ROLLOUT for the "new" side even
+-- though that's the more literally-named flag -- checked live, IS_NEW_ROLLOUT-and-not-
+-- recaptured totals slightly MORE than IS_NEW_INTEGRATED (251,856 vs 249,564 in one month,
+-- ~1% gap, likely Embed-enrolled-but-not-DI rollouts) -- using IS_NEW_INTEGRATED for "new"
+-- keeps this chart's numbers reconciling exactly with rolled_out_units_cube.sql and
+-- rolled_out_units_headline.sql's already-shipped headline figures, which both use
+-- IS_NEW_INTEGRATED. `total_units` = new_units + recaptured_units, safe to sum since disjoint.
+--
+-- NO MORE MISSING DAYS -- Kevin: "why are some of the dates missing? fill those all in."
+-- Previous version relied on Superblocks' chart component to fill gaps -- it didn't. Fixed at
+-- the SQL level instead with an explicit date spine (GENERATOR) covering every day in
+-- {{ LookbackDays.value }}, LEFT JOINed to the real data -- every day now returns a row, 0s
+-- and all, regardless of what the charting library does with missing categories.
 --
 -- REAL DATA IS SPIKY, NOT SMOOTH -- validated live: most days show a few thousand units from
--- a few hundred properties, but 2026-07-24 alone shows 36,276 units from just 308 properties --
--- a single large portfolio activation, not an anomaly to smooth over. Some days show zero rows
--- at all (weekends/no activity that day) -- {{ LookbackDays.value }} window should be filled
--- with zero-value days by Superblocks' chart component (not this query) so the daily bar chart
--- doesn't silently skip gaps.
+-- a few hundred properties, but 2026-07-24 alone shows 36,832 new + 1,492 recaptured units --
+-- a single large portfolio activation, not an anomaly to smooth over.
 --
 -- Same DSMB exclusion, segment_bucket/team_bucket mapping, and filters as
 -- rolled_out_units_cube.sql -- stays consistent with every other rolled-out-units view.
 
-WITH pmc_size AS (
+WITH date_spine AS (
+    SELECT DATEADD(day, SEQ4(), DATEADD(day, -{{ LookbackDays.value }}, CURRENT_DATE())) AS day
+    FROM TABLE(GENERATOR(ROWCOUNT => {{ LookbackDays.value }} + 1))
+),
+pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
@@ -49,13 +66,15 @@ base AS (
             ELSE NULL
         END AS team_bucket
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
-    WHERE s.IS_NEW_INTEGRATED = TRUE AND s.ROLLOUT_DATE IS NOT NULL
+    WHERE s.ROLLOUT_DATE IS NOT NULL
+      AND (s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER)
 ),
 daily AS (
     SELECT
-        b.ROLLOUT_DATE                     AS day,
-        SUM(b.PROPERTY_UNIT_COUNT)          AS new_units,
-        COUNT(*)                            AS properties
+        b.ROLLOUT_DATE                                                              AS day,
+        SUM(IFF(b.IS_NEW_INTEGRATED, b.PROPERTY_UNIT_COUNT, 0))                     AS new_units,
+        SUM(IFF(b.IS_RECAPTURED_NEW_ROLLOUT OR b.IS_RECAPTURED_OTHER, b.PROPERTY_UNIT_COUNT, 0)) AS recaptured_units,
+        COUNT(*)                                                                     AS properties
     FROM base b
     LEFT JOIN pmc_size p ON b.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
@@ -68,9 +87,12 @@ daily AS (
     GROUP BY 1
 )
 SELECT
-    day,
-    new_units,
-    properties,
-    SUM(new_units) OVER (ORDER BY day) AS cumulative_new_units
-FROM daily
-ORDER BY day;
+    ds.day,
+    COALESCE(d.new_units, 0)                                             AS new_units,
+    COALESCE(d.recaptured_units, 0)                                      AS recaptured_units,
+    COALESCE(d.new_units, 0) + COALESCE(d.recaptured_units, 0)           AS total_units,
+    COALESCE(d.properties, 0)                                            AS properties,
+    SUM(COALESCE(d.new_units, 0) + COALESCE(d.recaptured_units, 0)) OVER (ORDER BY ds.day) AS cumulative_units
+FROM date_spine ds
+LEFT JOIN daily d ON ds.day = d.day
+ORDER BY ds.day;
