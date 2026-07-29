@@ -9,27 +9,63 @@
 -- in anywhere. Units and activity live in separate systems today (Sigma vs Salesforce
 -- reports) with no correlation layer connecting them. This closes that gap.
 --
--- Team taxonomy note: uses FLEX.MART.DIM_EMPLOYEE_HISTORY.TEAM_NAME (current employee team)
--- as the single team source for BOTH sides of the correlation. PROPERTY_BP_MONTH_STATS'
--- HUBSPOT_STATIC_TEAM_NAME_DEAL (deal-time team) is a DIFFERENT taxonomy (pod names don't
--- fully overlap) -- mixing the two would silently misattribute activity to the wrong team.
--- Units here are FCT_CRM_OPPORTUNITY.FLEX_UNIT_COUNT (deal-grain, current owner's team),
--- not the rolled-out-units cube, to stay on one consistent taxonomy.
+-- Units here are FCT_CRM_OPPORTUNITY.FLEX_UNIT_COUNT (deal-grain, current owner's team), not
+-- the rolled-out-units cube, to stay on one consistent taxonomy.
 --
 -- Validated against live Snowflake 2026-07-27 -- REAL output, not illustrative:
 --   Strategic Team: activity down 49% (1446 -> 731), units down 51% (148,813 -> 73,295)
 --   Drilling into Strategic Team reps: Evan Klein down 75%, Doron David down 75%,
 --   Jennette Sanchez down 46% -- two reps account for most of the team's activity drop.
 --
--- FILTER ESCAPING -- Part B's {{ Team.value }} = 'Strategic Team' works fine, but the same
--- pattern breaks the moment someone clicks a row for "Brandon's Team" or "Cory's Team" --
--- confirmed live elsewhere in this repo (naive '{{Value}}' interpolation is not apostrophe-
--- safe). Prefer Superblocks' native bind-parameter syntax for the Snowflake connector over
--- raw Mustache substitution here; if only Mustache is available, double the apostrophes in
--- the value before it reaches this query.
+-- REBUILT 2026-07-29 -- two fixes, per Kevin's sweeping "dont just fix this in this query it
+-- needs to be fixed everywhere. i dont want to see inactive or users on entirely diff teams
+-- in any table":
+--   1. TEAM_BUCKET, NOT RAW TEAM_NAME -- this file previously grouped by raw
+--      DIM_EMPLOYEE_HISTORY.TEAM_NAME directly, which meant it never collapsed the stale
+--      Cory's Team/Heidi's Team labels into Dana's Team the way every other query in this
+--      repo does, and Part B's {{ Team.value }} filter had to match a raw pod name instead of
+--      the clean team_bucket value the rest of the app uses. Both parts now use the same
+--      team_map pattern as activity_vs_outcome_by_rep.sql.
+--   2. INACTIVE/CROSS-TEAM LEAKAGE FIX -- same root cause as everywhere else in this repo:
+--      DIM_EMPLOYEE_HISTORY has no active/inactive concept and carries multiple IS_CURRENT
+--      rows per person across source systems. team_map dedupes to the Salesforce-sourced row,
+--      joins deduped STG_SALESFORCE__USER for real TEAM_NAME/PARENT_TEAM/IS_ACTIVE/
+--      LAST_LOGIN_AT_UTC (PARENT_TEAM='Mid Market +' required for the Strategic pod, drops
+--      Saba Obaid-style stray records), and applies the standard {{ GraceMonths.value }}
+--      (default 2) departure grace period.
+--
+-- FILTER ESCAPING -- Part B's {{ Team.value }} now matches a team_bucket value ("Dana's
+-- Team"), which still contains an apostrophe -- the same escaping risk as every value filter
+-- in this repo applies. Prefer Superblocks' native bind-parameter syntax for the Snowflake
+-- connector over raw Mustache substitution; if only Mustache is available, double the
+-- apostrophe before it reaches this query.
 
 -- Part A: team-level correlation flag
-WITH activity AS (
+WITH emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+team_map AS (
+    SELECT ed.EMPLOYEE_SK, u.FULL_NAME,
+        CASE
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+    WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
+),
+activity AS (
     SELECT EMPLOYEE_SK, TS FROM (
         SELECT EMPLOYEE_SK, COMPLETED_AT_UTC AS TS FROM FLEX.SALES.FCT_CRM_TASK
         WHERE TASK_STATUS = 'completed' AND TASK_DIRECTION = 'outbound'
@@ -39,21 +75,19 @@ WITH activity AS (
     )
 ),
 team_activity AS (
-    SELECT e.TEAM_NAME AS team,
+    SELECT m.team_bucket AS team,
         SUM(IFF(a.TS BETWEEN {{ ThisPeriodStart }} AND {{ ThisPeriodEnd }}, 1, 0)) AS activity_this,
         SUM(IFF(a.TS BETWEEN {{ LastPeriodStart }} AND {{ LastPeriodEnd }}, 1, 0)) AS activity_last
     FROM activity a
-    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON a.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
-    WHERE e.TEAM_NAME IS NOT NULL
+    JOIN team_map m ON a.EMPLOYEE_SK = m.EMPLOYEE_SK AND m.team_bucket IS NOT NULL
     GROUP BY 1
 ),
 team_units AS (
-    SELECT e.TEAM_NAME AS team,
+    SELECT m.team_bucket AS team,
         SUM(IFF(o.IS_CLOSED_WON AND o.CLOSED_AT_UTC BETWEEN {{ ThisPeriodStart }} AND {{ ThisPeriodEnd }}, o.FLEX_UNIT_COUNT, 0)) AS units_this,
         SUM(IFF(o.IS_CLOSED_WON AND o.CLOSED_AT_UTC BETWEEN {{ LastPeriodStart }} AND {{ LastPeriodEnd }}, o.FLEX_UNIT_COUNT, 0)) AS units_last
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
-    WHERE e.TEAM_NAME IS NOT NULL
+    JOIN team_map m ON o.OWNER_SK = m.EMPLOYEE_SK AND m.team_bucket IS NOT NULL
     GROUP BY 1
 )
 SELECT * FROM (
@@ -79,8 +113,33 @@ ORDER BY activity_pct_change ASC;
 
 -- Part B: rep-level drill-in, once a team is clicked -- "who's actually down within this team"
 -- {{ Team.value }} is set by clicking a Part A row in Superblocks (same drill-down mechanic
--- as the other insight queries -- no separate query needed per team).
-WITH activity AS (
+-- as the other insight queries -- no separate query needed per team). Value is now a
+-- team_bucket ("Dana's Team"), matching Part A's output column.
+WITH emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+team_map AS (
+    SELECT ed.EMPLOYEE_SK, u.FULL_NAME,
+        CASE
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+    WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
+),
+activity AS (
     SELECT EMPLOYEE_SK, TS FROM (
         SELECT EMPLOYEE_SK, COMPLETED_AT_UTC AS TS FROM FLEX.SALES.FCT_CRM_TASK
         WHERE TASK_STATUS = 'completed' AND TASK_DIRECTION = 'outbound'
@@ -90,7 +149,7 @@ WITH activity AS (
     )
 )
 SELECT
-    e.FULL_NAME AS rep,
+    m.FULL_NAME AS rep,
     SUM(IFF(a.TS BETWEEN {{ ThisPeriodStart }} AND {{ ThisPeriodEnd }}, 1, 0)) AS activity_this,
     SUM(IFF(a.TS BETWEEN {{ LastPeriodStart }} AND {{ LastPeriodEnd }}, 1, 0)) AS activity_last,
     DIV0(
@@ -99,8 +158,8 @@ SELECT
         SUM(IFF(a.TS BETWEEN {{ LastPeriodStart }} AND {{ LastPeriodEnd }}, 1, 0))
     ) AS pct_change
 FROM activity a
-LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON a.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
-WHERE e.TEAM_NAME = '{{ Team.value }}'
+JOIN team_map m ON a.EMPLOYEE_SK = m.EMPLOYEE_SK
+WHERE m.team_bucket = '{{ Team.value }}'
 GROUP BY 1
 HAVING SUM(IFF(a.TS BETWEEN {{ LastPeriodStart }} AND {{ LastPeriodEnd }}, 1, 0)) > 10
 ORDER BY pct_change ASC;

@@ -33,6 +33,15 @@
 -- segment), and only show an intermediate Team sub-level when SMB specifically is clicked
 -- (Sebastian's vs. Rory's, via performance_cube.sql's existing team_bucket grouping filtered
 -- to segment_bucket='SMB' -- no new query needed for that intermediate step).
+--
+-- INACTIVE/CROSS-TEAM LEAKAGE FIX (2026-07-29) -- same root cause and fix as
+-- activity_vs_outcome_by_rep.sql's header. base's employee join now goes through a deduped,
+-- grace-period-aware team_map (Salesforce-sourced DIM_EMPLOYEE_HISTORY row -> deduped
+-- STG_SALESFORCE__USER for real TEAM_NAME/PARENT_TEAM/IS_ACTIVE/LAST_LOGIN_AT_UTC, PARENT_TEAM
+-- = 'Mid Market +' required for the Strategic pod) instead of joining DIM_EMPLOYEE_HISTORY
+-- directly -- drops departed-beyond-{{ GraceMonths.value }} reps and Saba Obaid-style stray
+-- records from the rep-level rows entirely, same tradeoff as everywhere else in this repo
+-- (segment/team totals shrink by whatever that rep's stale volume was, which is the right call).
 
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
@@ -66,28 +75,49 @@ bp_periods AS (
         DATEADD(day, 3, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label)))
     FROM current_bp
 ),
-base AS (
-    SELECT
-        o.*,
-        e.FULL_NAME AS rep,
+emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+team_map AS (
+    SELECT ed.EMPLOYEE_SK, u.FULL_NAME, u.TEAM_NAME, u.IS_ACTIVE, u.LAST_LOGIN_AT_UTC,
         CASE
-            WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
-            WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-            WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
-            WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
             ELSE NULL
         END AS team_bucket,
         CASE
-            WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-            WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-            WHEN e.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-            WHEN e.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
-            WHEN e.TEAM_NAME IS NULL THEN 'Not Set'
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Strategic'
+            WHEN u.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN u.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN u.TEAM_NAME IS NULL THEN 'Not Set'
             ELSE NULL
         END AS segment_bucket
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+),
+base AS (
+    SELECT
+        o.*,
+        m.FULL_NAME AS rep,
+        m.team_bucket,
+        m.segment_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+    LEFT JOIN team_map m ON o.OWNER_SK = m.EMPLOYEE_SK
     WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+      -- departed-rep exclusion: keep if no employee match at all (preserve as before, don't
+      -- punish a join miss), OR currently active, OR inactive but within the grace window
+      AND (m.FULL_NAME IS NULL OR m.IS_ACTIVE OR m.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
 )
 SELECT
     p.period,

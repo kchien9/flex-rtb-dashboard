@@ -31,6 +31,13 @@
 -- Rory's (reassigned). Both would otherwise look like unexplained performance drops.
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
+--
+-- DEDUP FIX (2026-07-29) -- confirmed elsewhere in this repo that STG_SALESFORCE__USER can
+-- carry duplicate rows per FULL_NAME (Morgan Giles, Brad Robins -- one real/active, one stale/
+-- deactivated with a mangled username). Part B's join on FULL_NAME was naive and could
+-- non-deterministically pick either one -- deduped via the same QUALIFY pattern as
+-- rep_leaderboard.sql. NOT applying the grace-period exclusion here on purpose -- this file's
+-- entire point is to SHOW departed/reassigned status as 1:1 context, not hide it.
 
 -- Part A: team-level trend, per manager's pod -- the headline number for the 1:1
 SELECT
@@ -45,6 +52,11 @@ WHERE HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}';
 -- Part B: per-rep breakdown within the pod, classified current vs. departed/reassigned --
 -- the "why" behind Part A's number, and specifically what to flag as headcount context
 -- rather than a performance concern.
+WITH user_dedup AS (
+    SELECT FULL_NAME, TEAM_NAME, IS_ACTIVE
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+)
 SELECT
     r.rep,
     r.units_this,
@@ -68,7 +80,7 @@ FROM (
     GROUP BY 1
     HAVING units_this > 0 OR units_last > 0
 ) r
-LEFT JOIN FLEX.STG_SALESFORCE.STG_SALESFORCE__USER u ON u.FULL_NAME = r.rep
+LEFT JOIN user_dedup u ON u.FULL_NAME = r.rep
 ORDER BY r.units_this - r.units_last ASC;
 
 -- Pod name reference (confirmed with Kevin 2026-07-27, Dana resolved 2026-07-28, Hans still open):

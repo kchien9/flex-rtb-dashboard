@@ -10,6 +10,11 @@
 -- (Meetings->Units causal chain), narrower grain. Real validated example: Umar Khan
 -- (Brandon's Team) down from 28 to 3 meetings, Ruby Baer down from 34 to 13 -- exactly the
 -- "2 reps dropped the ball" pattern Kevin described, not hypothetical.
+--
+-- INACTIVE/CROSS-TEAM LEAKAGE FIX (2026-07-29) -- same root cause and fix as
+-- activity_vs_outcome_by_rep.sql's header -- meets now dedupes DIM_EMPLOYEE_HISTORY to the
+-- Salesforce-sourced row and joins deduped STG_SALESFORCE__USER (PARENT_TEAM='Mid Market +'
+-- required for the Strategic pod, standard {{ GraceMonths.value }} grace period).
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
                DATE_TRUNC('month', CURRENT_DATE()),
@@ -28,19 +33,36 @@ bp_periods AS (
             DATEADD(day, 4, DATEADD(month, -2, bp_month_label)))
     FROM current_bp
 ),
-meets AS (
-    SELECT p.period, e.FULL_NAME AS rep,
+emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+team_map AS (
+    SELECT ed.EMPLOYEE_SK, u.FULL_NAME,
         CASE
-            WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
-            WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-            WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
-            WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
             ELSE NULL
-        END AS team_bucket,
+        END AS team_bucket
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+    WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
+),
+meets AS (
+    SELECT p.period, m.FULL_NAME AS rep, m.team_bucket,
         COUNT(*) AS meetings
     FROM bp_periods p
-    JOIN FLEX.SALES.FCT_CRM_MEETING m ON m.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date AND m.MEETING_STATUS = 'completed'
-    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON m.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+    JOIN FLEX.SALES.FCT_CRM_MEETING mt ON mt.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date AND mt.MEETING_STATUS = 'completed'
+    JOIN team_map m ON mt.EMPLOYEE_SK = m.EMPLOYEE_SK AND m.team_bucket IS NOT NULL
     GROUP BY 1, 2, 3
 )
 SELECT

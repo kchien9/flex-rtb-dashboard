@@ -63,6 +63,7 @@ per page, or filters will drift out of sync between pages.
 | `BpMonth` | Date picker or set via drill-down click | any BP month | opportunity_drilldown |
 | `SizeFloor` | Number input, default `100` | integer | watchlist_large_deals_at_risk |
 | `PodName` | Dropdown, constrained | `Brandon's Team`, `SMB Account Executives 1`, `SMB Account Executives 2` (Dana's and Hans's pod names still unconfirmed — don't add placeholder guesses to this list) | oneonone_prep (paused, not blocking) |
+| `GraceMonths` | Number input, **default required, cannot be empty** | integer, default `2` — departed-rep grace period (see README's "no inactive/wrong-team reps" gotcha) | rep_leaderboard, rep_by_msp, activity_vs_outcome_by_rep, activity_cube, closed_won_by_rep, full_funnel_by_segment, insights_activity_to_outcome, opportunity_drilldown, insights_stage_velocity, insights_activity_correlation, rolled_out_units_cube |
 
 ## 3. Build order (matches README priority)
 
@@ -115,3 +116,22 @@ A→Part B pattern:
 - Segment cuts on new-table queries are unreliable (~69% "Unknown" on closed-won) — don't
   offer a Segment filter on anything that queries `FCT_CRM_OPPORTUNITY` directly unless it's
   the computed bucket in `insights_stage_velocity.sql`.
+- **Every rep-listing query now excludes departed/wrong-team reps by construction** (fixed
+  2026-07-29, see README's data-quality gotchas for the full writeup) — don't re-introduce a
+  raw `DIM_EMPLOYEE_HISTORY` join if you add a new rep-level query, use the `team_map` CTE
+  pattern from `activity_vs_outcome_by_rep.sql` instead. `GraceMonths` must have a default
+  (2) set on the component — an empty value is a SQL syntax error, same as `LookbackMonths`.
+- `open_opportunities_by_segment.sql`'s staleness filter now uses real Task/Meeting activity
+  instead of `UPDATED_AT_UTC` (proven to be an automated-sync timestamp, not a human-touched
+  signal) — this is a much stricter filter and drops the "fresh" pipeline number a lot (2.6M
+  vs. the old 14.8M). Also surfaced a separate, unresolved finding: `STATIC_TEAM_NAME`
+  (team attribution) on OPEN deals correlates almost perfectly with deal age — unattributed
+  ("Not Set") deals are nearly all <2 months old, attributed deals are nearly all >400 days
+  old — meaning segment-level cuts of open pipeline may not be a meaningful view at all. Flagged
+  to Kevin, not yet resolved.
+- `rolled_out_units_cube.sql`'s "Rolled-Out Units, by Segment" card must bind to
+  `new_integrated_units` (the FLOW metric, one BP month), never `integrated_total_units` (the
+  STOCK metric, cumulative network total) — confirmed live a Superblocks card was showing the
+  stock number (MM/Ent 3.5M) under a "Rolled-Out Units" label; real rolled-out-this-month for
+  MM/Ent is ~27-62K. Same stock-vs-flow bug class as the earlier 30M-unit incident, different
+  flavor (wrong column, not summed across months this time).

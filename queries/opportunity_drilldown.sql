@@ -29,36 +29,54 @@
 --
 -- SALESFORCE LINK -- opportunity_id is already in the SELECT list, this is the field to build
 -- the deep link from in Superblocks: every row in this drill-down should be clickable.
+--
+-- INACTIVE/CROSS-TEAM LEAKAGE FIX (2026-07-29) -- same root cause and fix as
+-- activity_vs_outcome_by_rep.sql's header. The employee join now goes through a deduped,
+-- grace-period-aware team_map (Salesforce-sourced DIM_EMPLOYEE_HISTORY row -> deduped
+-- STG_SALESFORCE__USER, PARENT_TEAM='Mid Market +' required for the Strategic pod,
+-- {{ GraceMonths.value }} grace period) instead of joining DIM_EMPLOYEE_HISTORY directly.
 
+WITH emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+team_map AS (
+    SELECT ed.EMPLOYEE_SK, u.FULL_NAME, u.TEAM_NAME,
+        CASE
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN u.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+    WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
+)
 SELECT
     o.OPPORTUNITY_NAME                                 AS opportunity,
     o.OPPORTUNITY_TYPE                                 AS deal_type,
-    e.FULL_NAME                                        AS rep,
-    e.TEAM_NAME                                        AS team,
-    CASE
-        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
-        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
-        ELSE NULL
-    END                                                 AS team_bucket,
+    m.FULL_NAME                                        AS rep,
+    m.TEAM_NAME                                        AS team,
+    m.team_bucket,
     li.ROLLOUT_MONTH                                   AS bp_month,
     SUM(li.UNIT_COUNT)                                 AS units,
     COUNT(DISTINCT li.PROPERTY_ID)                     AS properties,
     o.CLOSED_AT_UTC                                    AS closed_date,
     o.OPPORTUNITY_ID                                   AS opportunity_id
 FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
-JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON li.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+JOIN team_map m ON li.OWNER_SK = m.EMPLOYEE_SK
 LEFT JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
 WHERE li.ROLLOUT_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-  {{#Rep.value}}       AND e.FULL_NAME = '{{Rep.value}}'         {{/Rep.value}}
-  {{#Team.value}}      AND CASE
-        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
-        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
-        ELSE NULL
-    END = '{{Team.value}}' {{/Team.value}}
+  {{#Rep.value}}       AND m.FULL_NAME = '{{Rep.value}}'         {{/Rep.value}}
+  {{#Team.value}}      AND m.team_bucket = '{{Team.value}}' {{/Team.value}}
   {{#BpMonth.value}}   AND li.ROLLOUT_MONTH = '{{BpMonth.value}}' {{/BpMonth.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
 GROUP BY 1, 2, 3, 4, 5, 6, 9, 10

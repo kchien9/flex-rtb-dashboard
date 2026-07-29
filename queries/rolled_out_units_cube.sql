@@ -75,8 +75,31 @@
 -- agree row for row. Confirmed live volume: Dana's Team 12.78M units/3mo (includes the
 -- Cory's Team / Heidi's Team stale labels), Brandon's Team 12.97M, Sebastian's Team 3.2M,
 -- Rory's Team 2.68M.
+--
+-- DEPARTED-REP EXCLUSION (2026-07-29) -- Kevin: "this rep in this team taylor mobley hasnt
+-- been w the company in a year - why is she appearing in rolled out?" Root cause: the legacy
+-- unnumbered "SMB Account Executives" pod (distinct from "...1"/"...2") has exactly ONE
+-- contributor this month, and it's Taylor Mobley -- her 189 units are real (a property from an
+-- old deal just finished integrating, a normal rollout lag), but HUBSPOT_DEAL_OWNER is a
+-- static HubSpot snapshot with no employment-status concept at all, so she shows up as if
+-- current. This was also the entire "extra team" row Kevin spotted under SMB in the Rolled-Out
+-- drill that Closed Won didn't show (that card's team_bucket mapping already excludes the
+-- unnumbered pod from team-level; this one didn't have an equivalent guard on the rep itself).
+-- Fix: join deal_owner_status (same deduped-STG_SALESFORCE__USER + {{ GraceMonths.value }}
+-- grace-period pattern as rep_leaderboard.sql) and drop any row whose HUBSPOT_DEAL_OWNER is
+-- departed beyond the grace window -- same rule already applied and Kevin-approved elsewhere
+-- in this repo, now consistent here too. Segment/team TOTALS shrink by whatever a departed
+-- rep's stale volume was (189 units here -- immaterial against multi-million segment totals),
+-- which is the right tradeoff: an accurate-to-the-unit total that includes a phantom current
+-- rep is worse than a total that's off by a rounding error but never shows someone who left a
+-- year ago as active.
 
-WITH pmc_size AS (
+WITH deal_owner_status AS (
+    SELECT FULL_NAME, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
@@ -118,6 +141,7 @@ SELECT
     SUM(s.ROLLED_OUT_UNITS_MOM_CHANGE)                                  AS net_change_units
 FROM base s
 LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+LEFT JOIN deal_owner_status u ON u.FULL_NAME = s.HUBSPOT_DEAL_OWNER
 -- LookbackMonths needs a Superblocks component default (e.g. 6) -- if this binding is ever
 -- empty, DATEADD(month, -, ...) is a syntax error, not a "no filter applied" no-op.
 -- Resolved from MAX(BP_MONTH), not CURRENT_DATE() -- calendar month != current BP month
@@ -129,6 +153,9 @@ WHERE s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_M
   AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
   -- excluded org pods (DSMB/Partner Success/SDR/leadership/legacy) -- see header comment
   AND s.segment_bucket IS NOT NULL
+  -- departed-rep exclusion: keep if no user record match (don't punish a join miss), OR
+  -- currently active, OR inactive but logged in within the grace window
+  AND (u.FULL_NAME IS NULL OR u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
   {{#Team.value}}     AND s.team_bucket = '{{Team.value}}'                       {{/Team.value}}
   {{#Msp.value}}       AND s.PMS = '{{Msp.value}}'                                {{/Msp.value}}
   {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE = '{{DealType.value}}'             {{/DealType.value}}

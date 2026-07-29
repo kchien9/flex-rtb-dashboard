@@ -30,6 +30,14 @@
 --
 -- Validated live 2026-07-28: MM/Ent SDR calls down 11% (2,238 -> 1,981) and AE meetings down
 -- 61% (109 -> 42) in the same window -- a real, visible lag relationship, not a coincidence.
+--
+-- INACTIVE/CROSS-TEAM LEAKAGE FIX (2026-07-29) -- same root cause and fix as
+-- activity_vs_outcome_by_rep.sql's header. emp now dedupes DIM_EMPLOYEE_HISTORY to the
+-- Salesforce-sourced row and joins deduped STG_SALESFORCE__USER for real TEAM_NAME/
+-- PARENT_TEAM/IS_ACTIVE/LAST_LOGIN_AT_UTC (PARENT_TEAM='Mid Market +' required for the
+-- Strategic ae_segment), applying the standard {{ GraceMonths.value }} grace period -- this
+-- matters here even though the output is segment-level, not rep-level, because a departed or
+-- mis-tagged rep's activity/units would otherwise silently inflate a segment total.
 
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
@@ -47,23 +55,35 @@ bp_periods AS (
         DATEADD(day, 3, DATEADD(month, -1, bp_month_label))
     FROM current_bp
 ),
+emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
 emp AS (
-    SELECT EMPLOYEE_SK,
+    SELECT ed.EMPLOYEE_SK,
         CASE
-            WHEN TEAM_NAME = 'SMB SDRs' THEN 'SMB'
-            WHEN TEAM_NAME = 'MM/Enterprise SDRs' THEN 'MM/Ent'
-            WHEN TEAM_NAME = 'Strategic SDRs' THEN 'Strategic'
+            WHEN u.TEAM_NAME = 'SMB SDRs' THEN 'SMB'
+            WHEN u.TEAM_NAME = 'MM/Enterprise SDRs' THEN 'MM/Ent'
+            WHEN u.TEAM_NAME = 'Strategic SDRs' THEN 'Strategic'
             ELSE NULL
         END AS sdr_segment,
         CASE
-            WHEN TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-            WHEN TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-            WHEN TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-            WHEN TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Strategic'
+            WHEN u.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN u.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
             ELSE NULL
         END AS ae_segment
-    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
-    WHERE IS_CURRENT = TRUE
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+    WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
 ),
 sdr_calls AS (
     SELECT p.period, e.sdr_segment AS segment, COUNT(DISTINCT t.TASK_ID) AS sdr_calls

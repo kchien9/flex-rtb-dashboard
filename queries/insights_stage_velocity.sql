@@ -32,9 +32,16 @@
 -- ignore), but don't be surprised if Superblocks shows a stray future-dated row.
 -- Also found: several of Part B's longest-stuck deals belong to reps already confirmed
 -- departed in oneonone_prep.sql (Jacob Fidler, Redding Tews) -- these are zombie deals nobody
--- closed out, not live 800-day negotiations. Worth a "still assigned to a departed rep" flag
--- if this becomes a real feature (join to STG_SALESFORCE__USER.IS_ACTIVE like oneonone_prep.sql
--- does), not built here yet since it doesn't change the trend math, just the watch-list framing.
+-- closed out, not live 800-day negotiations.
+--
+-- BUILT NOW (2026-07-29), per Kevin's sweeping "dont just fix this in this query it needs to
+-- be fixed everywhere. i dont want to see inactive... in any table" -- same root cause and fix
+-- as activity_vs_outcome_by_rep.sql's header. Part B's rep field now comes from a deduped,
+-- grace-period-aware team_map (Salesforce-sourced DIM_EMPLOYEE_HISTORY row -> deduped
+-- STG_SALESFORCE__USER, {{ GraceMonths.value }} grace period) instead of a raw
+-- DIM_EMPLOYEE_HISTORY join -- a deal whose owner is departed beyond the grace window now
+-- shows rep = NULL rather than a name, so the watch list still surfaces the stuck deal (it's
+-- real, still needs someone to close it out) but doesn't claim a departed person is working it.
 
 -- Part A: within-segment stage velocity trend, resolved transitions only
 WITH segmented AS (
@@ -80,7 +87,23 @@ ORDER BY 1, 2, 3;
 -- 1.5x their segment's trailing-90-day resolved average. Real validated example, Negotiation
 -- stage: SMB baseline ~0.8 days (fast-moving pipeline), yet several SMB deals show 700+ days
 -- still sitting in Negotiation -- clear zombie/stuck-deal signal, not noise.
-WITH segmented AS (
+WITH emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL
+    FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, FULL_NAME, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+rep_status AS (
+    SELECT ed.EMPLOYEE_SK, u.FULL_NAME, u.IS_ACTIVE, u.LAST_LOGIN_AT_UTC
+    FROM emp_dedup ed
+    JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+),
+segmented AS (
     SELECT
         o.OPPORTUNITY_ID, o.OPPORTUNITY_NAME, o.FLEX_UNIT_COUNT, o.IS_CLOSED,
         o.NEGOTIATION_AT_UTC, o.DEAL_REVIEW_AT_UTC,
@@ -90,9 +113,12 @@ WITH segmented AS (
             WHEN o.STATIC_TEAM_NAME IN ('Brandon''s Team','Cory''s Team') OR o.STATIC_TEAM_NAME LIKE 'Strategic%' OR o.STATIC_TEAM_NAME LIKE 'MM/Enterprise%' THEN 'Strategic/MM'
             ELSE NULL
         END AS segment,
-        e.FULL_NAME AS rep
+        -- departed-beyond-grace rep shows as NULL (no match, or inactive past the grace
+        -- window) rather than a name -- the deal itself stays on the watch list, it just
+        -- doesn't claim a departed person is actively working it
+        IFF(r.FULL_NAME IS NULL OR r.IS_ACTIVE OR r.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()), r.FULL_NAME, NULL) AS rep
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+    LEFT JOIN rep_status r ON o.OWNER_SK = r.EMPLOYEE_SK
     WHERE o.NEGOTIATION_AT_UTC IS NOT NULL AND o.NEGOTIATION_AT_UTC <= CURRENT_DATE()
 ),
 baseline AS (
