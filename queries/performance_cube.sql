@@ -71,13 +71,20 @@
 --
 -- All filterable dimensions (Team, Deal Type, Segment) are included so they can be
 -- layered together, not just whichever one is the current row grouping.
--- NO MSP FILTER HERE -- fixed 2026-07-28. PARTNER_MANAGEMENT_SOFTWARE is a dirty
--- deal-grain field (a single opportunity can span properties on different PMS systems,
--- so real rows contain jammed multi-values like "365 Connect;AMC Rent Pay;RealPage" --
--- confirmed live: ~4.8% of populated rows are multi-value, 75 distinct raw values total).
--- This confirms the exact warning already in the README ("use PMS on the rolled-out-units
--- table for MSP slicing instead") -- MSP slicing belongs on rolled_out_units_cube.sql
--- (clean PMS field, 7 real values), never on this deal-grain query.
+-- MSP FILTER -- ADDED BACK 2026-07-29, ORIGINAL REMOVAL WAS TOO BROAD. The "~4.8% dirty, 75
+-- distinct raw values" finding was measured across ALL closed-won deals ever, not the
+-- population this query actually filters to. Re-checked live, split by close year:
+-- 2022 (318 multi-value rows), 2023 (452) were genuinely dirty, but 2024 (73), 2025 (46),
+-- 2026-YTD (0 of 6,357) are essentially clean -- the dirtiness is a legacy/historical problem,
+-- not a current one. On CLOSED WON deals specifically, trailing 6 months: 5,759 deals, only
+-- 23 NULL (0.4%), ZERO multi-value rows. Since this query's LookbackMonths default keeps it
+-- recent anyway, MSP is safe to filter on here now. If LookbackMonths is ever pushed out past
+-- ~2023, re-check this -- the dirty legacy rows would start leaking back in.
+-- Kept on PARTNER_MANAGEMENT_SOFTWARE (deal-grain, matches this query's grain) rather than
+-- rolled_out_units_cube.sql's PMS (property-grain) -- a deal can close before any property on
+-- it has rolled out, so property-grain PMS wouldn't even exist yet for some of what this query
+-- counts. The two MSP fields can disagree on OLDER data (legacy dirtiness above); don't expect
+-- this query's MSP breakdown to reconcile exactly against rolled_out_units_cube.sql's.
 --
 -- DSMB + SEGMENT BUCKET (fixed 2026-07-28 -- this was flagged as an open gap since the
 -- start of this repo and left unfixed for too long; Kevin caught it live in Superblocks
@@ -198,6 +205,7 @@ SELECT
     o.segment_bucket,
     o.team_bucket,
     o.OPPORTUNITY_TYPE                                             AS deal_type,
+    o.PARTNER_MANAGEMENT_SOFTWARE                                  AS msp,
     COUNT(DISTINCT IFF(o.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date,
                        o.OPPORTUNITY_ID, NULL))                    AS pipeline_created,
     -- unit counts are the primary numbers -- this dashboard is about units, deal counts are
@@ -227,7 +235,8 @@ WHERE (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   {{#Team.value}}     AND o.team_bucket = '{{Team.value}}'                    {{/Team.value}}
   {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}'          {{/DealType.value}}
   {{#Segment.value}}   AND o.segment_bucket = '{{Segment.value}}'             {{/Segment.value}}
-GROUP BY 1, 2, 3, 4
+  {{#Msp.value}}        AND o.PARTNER_MANAGEMENT_SOFTWARE = '{{Msp.value}}'   {{/Msp.value}}
+GROUP BY 1, 2, 3, 4, 5
 ORDER BY 1, 2;
 
 -- Companion query: Meetings Completed (same bp_periods pattern, separate table). THIS is the

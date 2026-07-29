@@ -38,6 +38,17 @@
 -- Strategic ae_segment), applying the standard {{ GraceMonths.value }} grace period -- this
 -- matters here even though the output is segment-level, not rep-level, because a departed or
 -- mis-tagged rep's activity/units would otherwise silently inflate a segment total.
+--
+-- SDR HEADCOUNT TRANSPARENCY (2026-07-29) -- Kevin: "how are you segmenting sdr calls? are
+-- you looking at the sdr segment? louis trujillo is the only strategic sdr." Confirmed live --
+-- he's exactly right, and it's worse than "mostly one person": Strategic SDRs has ONE person
+-- total, period (MM/Enterprise SDRs has 3 active, SMB SDRs has 7). So the Strategic column in
+-- sdr_calls is literally Louis Trujillo's individual activity, not a team signal -- his PTO or
+-- a bad day reads as "Strategic SDR activity collapsed," which is misleading without context.
+-- Added `sdr_headcount` (COUNT DISTINCT active SDRs who logged at least one call that period,
+-- not the pod's static roster size) so a 1-person column is visibly different from a 7-person
+-- one wherever this is displayed -- same "don't hide small sample size" principle as
+-- sales_cycle_time_by_segment.sql's `deals`/`deals_with_touch` columns.
 
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
@@ -86,7 +97,9 @@ emp AS (
     WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
 ),
 sdr_calls AS (
-    SELECT p.period, e.sdr_segment AS segment, COUNT(DISTINCT t.TASK_ID) AS sdr_calls
+    SELECT p.period, e.sdr_segment AS segment,
+        COUNT(DISTINCT t.TASK_ID) AS sdr_calls,
+        COUNT(DISTINCT t.EMPLOYEE_SK) AS sdr_headcount
     FROM bp_periods p
     JOIN FLEX.SALES.FCT_CRM_TASK t ON t.COMPLETED_AT_UTC BETWEEN p.start_date AND p.end_date
         AND t.TASK_STATUS = 'completed' AND t.TASK_TYPE = 'call'
@@ -148,6 +161,7 @@ SELECT
     COALESCE(sc.period, am.period, pc.period, cw.period, ro.period) AS period,
     COALESCE(sc.segment, am.segment, pc.segment, cw.segment, ro.segment) AS segment,
     sc.sdr_calls,
+    sc.sdr_headcount,
     am.ae_meetings,
     pc.pipeline_created,
     cw.closed_won_units,
