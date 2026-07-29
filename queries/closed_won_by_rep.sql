@@ -8,6 +8,18 @@
 -- who's actually driving it" pattern already established elsewhere in this repo
 -- (insights_driver_concentration.sql).
 --
+-- PERIOD RESPONSIVENESS -- fixed 2026-07-28, real bug Kevin caught: this was hardcoded to
+-- this_month/last_month_full only, so switching the page's Week/Month/Quarter toggle changed
+-- the parent "Closed Won, by Team" card but NOT this drill-down underneath it -- the rep
+-- breakdown kept showing month numbers no matter what was selected above. Fixed by returning
+-- ALL THREE granularities (period column, same pattern as performance_cube.sql) so Superblocks
+-- can filter to whichever pair matches the active toggle, exactly like the parent card does.
+-- Uses the "_full" comparator for every granularity (this_week/last_week_full,
+-- this_month/last_month_full, this_quarter/last_quarter_full) -- NOT the pacing-matched _mtd/
+-- _wtd/_qtd variants -- because Closed Won units never get a pacing comparison anywhere in
+-- this repo (deal timing is arbitrary, see performance_cube.sql's header for why); this
+-- drill-down should never introduce a pacing comparison the parent card doesn't have either.
+--
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
 
 WITH current_bp AS (
@@ -16,39 +28,56 @@ WITH current_bp AS (
                DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
 ),
 bp_periods AS (
-    SELECT 'this_month' AS period,
-        DATEADD(day, 4, DATEADD(month, -1, bp_month_label)) AS start_date,
-        LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE()) AS end_date
+    SELECT 'this_week' AS period, DATE_TRUNC('week', CURRENT_DATE()) AS start_date, CURRENT_DATE() AS end_date
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_week_full', DATE_TRUNC('week', CURRENT_DATE()) - 7, DATE_TRUNC('week', CURRENT_DATE()) - 1
+    FROM current_bp
+    UNION ALL
+    SELECT 'this_month',
+        DATEADD(day, 4, DATEADD(month, -1, bp_month_label)),
+        LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE())
     FROM current_bp
     UNION ALL
     SELECT 'last_month_full',
         DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
         DATEADD(day, 3, DATEADD(month, -1, bp_month_label))
     FROM current_bp
+    UNION ALL
+    SELECT 'this_quarter',
+        DATEADD(day, 4, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label))),
+        LEAST(DATEADD(day, 3, DATEADD(month, 2, DATE_TRUNC('quarter', bp_month_label))), CURRENT_DATE())
+    FROM current_bp
+    UNION ALL
+    SELECT 'last_quarter_full',
+        DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))),
+        DATEADD(day, 3, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label)))
+    FROM current_bp
+),
+base AS (
+    SELECT
+        o.*,
+        e.FULL_NAME AS rep,
+        CASE
+            WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+    WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
 )
 SELECT
-    e.FULL_NAME AS rep,
-    CASE
-        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
-        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
-        ELSE NULL
-    END AS team_bucket,
-    SUM(IFF(o.IS_CLOSED_WON AND o.CLOSED_AT_UTC BETWEEN p1.start_date AND p1.end_date, o.FLEX_UNIT_COUNT, 0)) AS units_this_month,
-    SUM(IFF(o.IS_CLOSED_WON AND o.CLOSED_AT_UTC BETWEEN p2.start_date AND p2.end_date, o.FLEX_UNIT_COUNT, 0)) AS units_last_month
-FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
-JOIN bp_periods p1 ON p1.period = 'this_month'
-JOIN bp_periods p2 ON p2.period = 'last_month_full'
-WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
-GROUP BY 1, 2
-HAVING (units_this_month > 0 OR units_last_month > 0)
-  {{#Team.value}} AND CASE
-        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-        WHEN e.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
-        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
-        ELSE NULL
-    END = '{{Team.value}}' {{/Team.value}}
-ORDER BY units_this_month DESC;
+    p.period,
+    b.rep,
+    b.team_bucket,
+    SUM(IFF(b.IS_CLOSED_WON AND b.CLOSED_AT_UTC BETWEEN p.start_date AND p.end_date, b.FLEX_UNIT_COUNT, 0)) AS units
+FROM bp_periods p
+JOIN base b ON TRUE
+WHERE b.rep IS NOT NULL
+  {{#Team.value}} AND b.team_bucket = '{{Team.value}}' {{/Team.value}}
+GROUP BY 1, 2, 3
+HAVING units > 0
+ORDER BY p.period, units DESC;

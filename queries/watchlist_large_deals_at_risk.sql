@@ -79,6 +79,20 @@ LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.I
 WHERE i.IS_DELETED = FALSE
   AND i.FLEX_UNITS >= {{ SizeFloor.value }}  -- default 100
   AND i.LAST_MODIFIED_DATE_UTC >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())  -- default 2
+  -- SEGMENT EXCLUSION -- added 2026-07-28, real bug Kevin caught: GTM Support Teams and
+  -- DSMB 2 (and every other DSMB/Partner/SDR/leadership pod) were showing up on the Watch
+  -- List with no exclusion at all -- this branch never had the segment_bucket IS NOT NULL
+  -- filter that every other query in this repo has. Using the BROADER segment_bucket (not
+  -- the narrower team_bucket above) -- House Accounts and Not Set should still be able to
+  -- show up here, only DSMB/Partner/SDR/GTM Support/leadership pods are excluded.
+  AND CASE
+        WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+        WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+        WHEN e.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+        WHEN e.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+        WHEN e.TEAM_NAME IS NULL THEN 'Not Set'
+        ELSE NULL
+    END IS NOT NULL
   AND (
       i.IMPLEMENTATION_STAGE = 'Failed to Roll Out'
       OR (i.IMPLEMENTATION_STAGE = 'Onboarding Delayed' AND i.ANTICIPATED_GO_LIVE_DATE < CURRENT_DATE())
