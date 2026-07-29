@@ -284,3 +284,70 @@ SELECT
     COUNT(*) AS streak_length_months
 FROM with_group
 WHERE grp = (SELECT MAX(grp) FROM with_group);
+
+-- Part F: activity leading indicator -- added 2026-07-29. Kevin, on what Sham actually needs
+-- from this summary: "is our mix on new logo vs expansions trending poorly, or if activities
+-- have dropped off drastically (bc this can forecast future unit drop offs)." Parts A-E cover
+-- units/mix/deal-concentration but nothing about calls/meetings -- this closes that gap.
+-- Calls/meetings, this vs last month, same team_bucket-eligible-rep scope as
+-- activity_vs_outcome_by_rep.sql (deduped, grace-period-aware, PARENT_TEAM-guarded) so a
+-- departed/mis-tagged rep can't distort the trend the summary reports on.
+-- Validated live 2026-07-29, company-wide: calls UP 7.7% (34,849 -> 37,542) but meetings DOWN
+-- 9.7% (1,103 -> 996) -- a genuinely mixed signal, not a single clean direction. The LLM
+-- narration layer should say exactly that (mixed, not "activity is down") -- don't let either
+-- number alone drive the headline if they disagree.
+WITH current_bp AS (
+    SELECT IFF(DAY(CURRENT_DATE()) <= 4,
+               DATE_TRUNC('month', CURRENT_DATE()),
+               DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
+),
+bp_periods AS (
+    SELECT 'this_month' AS period, DATEADD(day, 4, DATEADD(month, -1, bp_month_label)) AS start_date,
+        LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE()) AS end_date FROM current_bp
+    UNION ALL
+    SELECT 'last_month_full', DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
+        DATEADD(day, 3, DATEADD(month, -1, bp_month_label)) FROM current_bp
+),
+emp_dedup AS (
+    SELECT EMPLOYEE_SK, EMAIL FROM FLEX.MART.DIM_EMPLOYEE_HISTORY
+    WHERE SOURCE_SYSTEM = 'salesforce' AND IS_CURRENT = TRUE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY UPDATED_AT_UTC DESC) = 1
+),
+user_dedup AS (
+    SELECT EMAIL, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY EMAIL ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+team_map AS (
+    SELECT ed.EMPLOYEE_SK,
+        CASE
+            WHEN u.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN u.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND u.PARENT_TEAM = 'Mid Market +' THEN 'Strategic'
+            WHEN u.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN u.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            ELSE NULL
+        END AS segment_bucket
+    FROM emp_dedup ed JOIN user_dedup u ON ed.EMAIL = u.EMAIL
+    WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
+),
+calls AS (
+    SELECT p.period, COUNT(DISTINCT t.TASK_ID) AS calls
+    FROM bp_periods p
+    JOIN FLEX.SALES.FCT_CRM_TASK t ON t.COMPLETED_AT_UTC BETWEEN p.start_date AND p.end_date
+        AND t.TASK_STATUS = 'completed' AND t.TASK_TYPE = 'call'
+    JOIN team_map tm ON t.EMPLOYEE_SK = tm.EMPLOYEE_SK AND tm.segment_bucket IS NOT NULL
+        {{#Segment.value}} AND tm.segment_bucket = '{{Segment.value}}' {{/Segment.value}}
+    GROUP BY 1
+),
+meetings AS (
+    SELECT p.period, COUNT(DISTINCT m.MEETING_ID) AS meetings
+    FROM bp_periods p
+    JOIN FLEX.SALES.FCT_CRM_MEETING m ON m.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date
+        AND m.MEETING_STATUS = 'completed'
+    JOIN team_map tm ON m.EMPLOYEE_SK = tm.EMPLOYEE_SK AND tm.segment_bucket IS NOT NULL
+        {{#Segment.value}} AND tm.segment_bucket = '{{Segment.value}}' {{/Segment.value}}
+    GROUP BY 1
+)
+SELECT COALESCE(c.period, mt.period) AS period, c.calls, mt.meetings
+FROM calls c
+FULL OUTER JOIN meetings mt ON c.period = mt.period
+ORDER BY 1;
