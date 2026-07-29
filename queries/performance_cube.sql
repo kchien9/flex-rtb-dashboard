@@ -50,6 +50,19 @@
 -- a delta against last_month_mtd for these two columns specifically. This is a Superblocks
 -- presentation-layer rule as much as a query one -- the query returns all periods' raw
 -- numbers regardless; don't wire a pacing-delta widget onto the units columns.
+--
+-- REFINED 2026-07-29 -- Kevin: "can we add pacing even if deal timing is arbitrary. i feel
+-- like its helpful to see how were trending still even if its not linear." This does NOT
+-- reverse the rule above -- the banned comparison is specifically this_month vs
+-- last_month_mtd (same-elapsed-day, a coin flip for lumpy deals). What Kevin's asking for is
+-- simpler and not banned: a plain %-delta between the two numbers ALREADY shown side by side
+-- (this_month vs last_month_full, e.g. "254,956 vs 319,419") -- a real, honest, non-projected
+-- statement of what already happened, not an extrapolated pace. Show the same arrow+% delta
+-- widget on closed_won_units/closed_lost_units (and rolled_out_units_headline.sql's rows) that
+-- the activity metrics already show, computed the same way ((this-last_full)/last_full), just
+-- keep the caption honest that it can swing hard on one large deal -- don't relabel it
+-- "pacing" in the UI copy, since that implies the banned projected version; "vs last [period]"
+-- is accurate, "pacing" is not.
 -- FILTER ESCAPING -- read before wiring any value filter here: team/rep names contain
 -- apostrophes ("Brandon's Team") that break naive '{{Value}}' string interpolation --
 -- confirmed live elsewhere in this repo. Prefer Superblocks' native bind-parameter syntax

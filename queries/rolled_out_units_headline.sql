@@ -9,9 +9,13 @@
 -- should be a separate trended bar chart bound to rolled_out_units_cube.sql's
 -- integrated_total_units column (already exists, already filterable), not this row.
 --
--- NO PACING % -- same principle as Closed Won/Closed Lost on this same summary table: deal/
--- rollout timing is arbitrary, so this uses the "_full" comparator (last_week_full, not a
--- pacing-matched partial week) same as everywhere else rolled-out units appear.
+-- NO PROJECTED PACING, BUT SHOW A PLAIN DELTA % -- same principle as Closed Won/Closed Lost on
+-- this same summary table (see performance_cube.sql's header, refined 2026-07-29): this uses
+-- the "_full" comparator (last_week_full, not a same-elapsed-day pacing-matched partial week)
+-- because rollout timing is arbitrary -- a same-elapsed-day comparison would be close to a coin
+-- flip. But a plain %-delta between the two numbers this query already returns (this_week vs
+-- last_week_full, etc.) is a real, honest, non-projected statement, not a banned pacing
+-- extrapolation -- show it with the same arrow+% widget the activity rows use.
 --
 -- WEEKLY GRAIN IS NEW, VALIDATED LIVE 2026-07-29 -- this is the first week-level cut of
 -- rolled-out units in this repo. Initially assumed impossible ("property-grain, updates
