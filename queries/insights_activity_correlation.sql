@@ -1,3 +1,11 @@
+-- DEPRECATED 2026-07-30 -- Kevin: "i think this activity to outcome table can be deprecated
+-- bc we cant really create a causal chain." This file's whole framing (the callout literally
+-- says "activity is down X% -- units are down Y% too") IS the causal narrative Kevin is
+-- pulling back from -- checked directly, the underlying correlation is too weak/inconsistent
+-- to support it. Replaced by full_funnel_by_segment.sql / activities_by_team.sql /
+-- activity_vs_outcome_by_rep.sql -- same numbers, side by side, no "X caused Y" callout text.
+-- Leave in place until Superblocks unwires it, then delete.
+--
 -- Insights Engine, Part 3: Activity <-> Outcome correlation
 -- Kevin's own framing: "SMB team's activities are 50% less this month -> units are less
 -- too." Then drill from the team-level activity drop into rep-level ("X person is doing

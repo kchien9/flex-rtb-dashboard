@@ -1,10 +1,19 @@
--- Full Funnel, by Segment -- the end-to-end chain Kevin described: "it starts w sdrs
--- activity and that leads to meetings which create pipeline which lead to closed units
--- which lead to rolled out units." Five stages, side by side, by segment, this month vs
--- last month -- if Rolled-Out Units is down for a segment, trace backward through this same
--- row: was Closed Won also down? Was Pipeline Created down before that? Were AE Meetings
--- down before that? Were SDR Calls down before that? The first stage that ISN'T down is
--- where the real story starts.
+-- Activities & Outcomes, by Segment -- the top level of the segment -> team -> rep drill
+-- Kevin asked for (same pattern rolled_out_units_cube.sql already uses). Five stages, side by
+-- side, by segment, this month vs last month.
+--
+-- NO IMPLIED CAUSAL CHAIN (corrected 2026-07-30) -- this file originally framed the five
+-- columns as a chain to "trace backward through" when one stage is down, implying each stage
+-- causes the next. Kevin corrected this: "i think this activity to outcome table can be
+-- deprecated bc we cant really create a causal chain... i just want to show total activities
+-- and then the trends." Checked directly (see project memory): calls->meetings and
+-- meetings->pipeline correlation at monthly-aggregate grain is weak and inconsistent (sometimes
+-- negative) across all three segments -- there isn't a clean, provable lag to trace. This table
+-- now does exactly what Kevin asked: show each stage's number and trend, side by side, and
+-- let a human decide if a pattern is real -- not narrate a causal story the data doesn't
+-- actually support. insights_activity_to_outcome.sql and insights_activity_correlation.sql
+-- (both explicitly causal-framed) are deprecated in favor of this table + activities_by_team.sql
+-- + activity_vs_outcome_by_rep.sql, at the segment/team/rep drill levels respectively.
 --
 -- SDR pods map cleanly onto the same 3 segments that have dedicated SDR support -- confirmed
 -- live: SMB SDRs, MM/Enterprise SDRs, Strategic SDRs (Deep SMB SDRs excluded, same DSMB
@@ -29,7 +38,10 @@
 -- via the standard pmc_size CTE, same as rolled_out_units_cube.sql.
 --
 -- Validated live 2026-07-28: MM/Ent SDR calls down 11% (2,238 -> 1,981) and AE meetings down
--- 61% (109 -> 42) in the same window -- a real, visible lag relationship, not a coincidence.
+-- 61% (109 -> 42) in the same window -- both real numbers, shown side by side. NOT claiming
+-- one caused the other (see the "NO IMPLIED CAUSAL CHAIN" note above, added 2026-07-30) --
+-- this specific pair moving together in one window isn't the same as a proven lag relationship
+-- across time; the direct correlation check found the broader pattern too weak to trust.
 --
 -- INACTIVE/CROSS-TEAM LEAKAGE FIX (2026-07-29) -- same root cause and fix as
 -- activity_vs_outcome_by_rep.sql's header. emp now dedupes DIM_EMPLOYEE_HISTORY to the

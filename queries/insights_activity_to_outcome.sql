@@ -1,3 +1,12 @@
+-- DEPRECATED 2026-07-30 -- Kevin: "i think this activity to outcome table can be deprecated
+-- bc we cant really create a causal chain... the causal table is creating a causal chain that
+-- may not exist." Both parts below frame activity as explaining/predicting outcomes, which the
+-- direct correlation check (see project memory) found too weak and inconsistent to support at
+-- monthly-aggregate grain. Replaced by full_funnel_by_segment.sql (segment) /
+-- activities_by_team.sql (team) / activity_vs_outcome_by_rep.sql (rep) -- same numbers, side by
+-- side, no causal narrative. Leave this file in place until Superblocks unwires whatever still
+-- points to it, then delete -- don't rebuild anything on top of it in the meantime.
+--
 -- Activity -> Outcome diagnostics -- two real questions Kevin wants answerable without
 -- digging: "why are we having a slow week -- should be bc lack of meetings, so less
 -- pipeline" (which reps specifically dropped meetings, pacing-matched) and "we saw an uptick
