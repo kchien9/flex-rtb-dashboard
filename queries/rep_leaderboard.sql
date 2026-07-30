@@ -16,13 +16,21 @@
 -- had already thrown away every row that could have matched. Fixed by widening the WHERE to
 -- both months and doing the period split entirely inside the two conditional SUMs.
 --
--- SEGMENT/TEAM BUCKET EXCLUSION (added 2026-07-28) -- this query is also the natural source
--- for the app's Rep filter dropdown (per Kevin: "DSMB reps should not be in the rep
--- dropdown"). Excluded via segment_bucket IS NOT NULL -- the BROADER bucket (keeps House
--- Accounts/Not Set reps, only drops DSMB/Partner Success/SDR/leadership pods), not the
--- narrower team_bucket -- a rep leaderboard should show every legitimate production rep, not
--- just the 4 direct-report pods. team_bucket is still exposed as its own column for when the
--- Team filter (which DOES use the narrower bucket) is applied on this page.
+-- REBUILT 2026-07-30 -- TEAM/SEGMENT MUST COME FROM THE PERSON, NOT THE DEAL. Original version
+-- computed segment_bucket/team_bucket from EACH ROW's own HUBSPOT_STATIC_TEAM_NAME_DEAL, then
+-- grouped by it -- meaning a rep whose historical deals carry more than one team tag could
+-- appear as MULTIPLE separate leaderboard rows (once per tag), and a rep who's since become a
+-- manager (no longer an IC) would still show up under whatever team their old deals happen to
+-- be tagged with. Kevin caught this exact failure mode on a different chart: "rory is now a
+-- manager so shouldnt be here too... how do we fix this across the entire dashboard." Checked
+-- live: Rory Averett's current record says TEAM_NAME='SMB Manager', but his old deals carry
+-- HUBSPOT_STATIC_TEAM_NAME_DEAL="Cory's Team" ($3.85M historical units) -- the same bulk-
+-- attribution artifact already found for Cory Baach/Evan Klein (see possible_departures.sql).
+-- Fix: segment_bucket/team_bucket now resolve ONCE per rep from their CURRENT
+-- STG_SALESFORCE__USER.TEAM_NAME (PARENT_TEAM='Mid Market +' guard for Strategic), not from
+-- any individual deal's historical tag. `team` (the raw display column) is now the rep's
+-- current TEAM_NAME too, for the same reason -- showing a stale/wrong pod name next to a rep
+-- who's moved on defeats the point of displaying it.
 --
 -- DEPARTURE GRACE PERIOD (added 2026-07-28) -- Kevin: "Ariel juuust left... they shouldnt
 -- disappear immediately... might want to keep for one or two months post departure." Uses
@@ -32,7 +40,7 @@
 -- verified with Kevin -- she really did just leave), so a hard IS_ACTIVE filter would drop
 -- someone the day they leave with zero grace period. {{ GraceMonths.value }} (default 2)
 -- keeps anyone whose last real login is within that window even if IS_ACTIVE is now FALSE.
--- Real validated behavior: Ariel Kurek (last login 4 days ago) and Redding Tews (11 days ago)
+-- Real validated behavior: Ariel Kurek (last login 4 days ago) and Redding Tews (13 days ago)
 -- -> kept; Jacob Fidler (~7 months ago) and Zach Branson (~10 months ago) -> dropped.
 --
 -- DUPLICATE USER RECORDS -- confirmed live: Morgan Giles and Brad Robins each have TWO
@@ -52,54 +60,54 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-base AS (
+user_dedup AS (
+    SELECT FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+current_rep AS (
     SELECT
-        s.*,
+        FULL_NAME,
+        TEAM_NAME                                                                     AS team,
         CASE
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'MM/Ent'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IS NULL THEN 'Not Set'
+            WHEN TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND PARENT_TEAM = 'Mid Market +' THEN 'Strategic'
+            WHEN TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN TEAM_NAME IS NULL THEN 'Not Set'
             ELSE NULL
         END AS segment_bucket,
         CASE
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'Brandon''s Team'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'SMB Account Executives 2' THEN 'Rory''s Team'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            WHEN TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
             ELSE NULL
-        END AS team_bucket
-    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
-),
-user_dedup AS (
-    SELECT FULL_NAME, IS_ACTIVE, LAST_LOGIN_AT_UTC
-    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+        END AS team_bucket,
+        IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM user_dedup
 )
 SELECT
     s.HUBSPOT_DEAL_OWNER                                                              AS rep,
-    s.HUBSPOT_STATIC_TEAM_NAME_DEAL                                                   AS team,
-    s.segment_bucket,
-    s.team_bucket,
+    cr.team,
+    cr.segment_bucket,
+    cr.team_bucket,
     SUM(IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
             AND s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0))                       AS units_this,
     SUM(IFF(s.BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
             AND s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0))                       AS units_last,
     SUM(IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
             AND (s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER), s.PROPERTY_UNIT_COUNT, 0)) AS recaptured_units_this
-FROM base s
+FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
 LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
-LEFT JOIN user_dedup u ON u.FULL_NAME = s.HUBSPOT_DEAL_OWNER
+JOIN current_rep cr ON cr.FULL_NAME = s.HUBSPOT_DEAL_OWNER
 WHERE s.BP_MONTH >= DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
   AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-  AND s.HUBSPOT_DEAL_OWNER IS NOT NULL
-  AND s.segment_bucket IS NOT NULL
-  -- departure grace period: keep if no user record match (don't punish a join miss), OR
-  -- currently active, OR inactive but logged in within the grace window
-  AND (u.FULL_NAME IS NULL OR u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
-  {{#Team.value}}     AND s.team_bucket = '{{Team.value}}'       {{/Team.value}}
-  {{#Segment.value}}  AND s.segment_bucket = '{{Segment.value}}' {{/Segment.value}}
+  AND cr.segment_bucket IS NOT NULL
+  -- departure grace period: currently active, OR inactive but logged in within the grace window
+  AND (cr.IS_ACTIVE OR cr.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
+  {{#Team.value}}     AND cr.team_bucket = '{{Team.value}}'       {{/Team.value}}
+  {{#Segment.value}}  AND cr.segment_bucket = '{{Segment.value}}' {{/Segment.value}}
   {{#Msp.value}}       AND s.PMS = '{{Msp.value}}'                {{/Msp.value}}
 GROUP BY 1, 2, 3, 4
 HAVING units_this > 0 OR units_last > 0
