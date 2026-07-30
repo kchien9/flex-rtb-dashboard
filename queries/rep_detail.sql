@@ -20,16 +20,19 @@
 --
 -- BOOK OF BUSINESS -- uses DIM_CRM_ACCOUNT_HISTORY.OWNER_ID (a real Salesforce Account-level
 -- owner assignment, distinct from OWNER_SK on individual deals) joined to
--- STG_SALESFORCE__USER.USER_ID. This is the first place in this repo using OWNER_ID -- checked
--- live: only ~50% of accounts (62,620 of 126,361) resolve OWNER_ID to a real Salesforce user,
--- same source-system-blend pattern as everywhere else in this repo (the other half are almost
--- certainly HubSpot-origin account records with a non-Salesforce owner ID). This means
--- `book_size` below is a LOWER BOUND on a rep's real book, not a precise count -- real,
--- validated example: Cory Baach's book resolves to 52 accounts via this method. Coverage =
--- accounts with real Task/Meeting activity that specific month / book_size. Validated live:
--- Cory Baach's coverage jumped from ~21-23% (Apr-Jun) to 79% (Jul) -- a real, meaningful
--- behavior change, not noise, and exactly the "what behaviors do they have" signal Kevin asked
--- for.
+-- STG_SALESFORCE__USER.USER_ID. Checked live: ~50% of accounts (62,620 of 126,361) have a real
+-- Salesforce-user OWNER_ID; the other half carry a legacy numeric ID from the pre-Salesforce
+-- system that never got reassigned. That's NOT a join gap to fix -- checked what those IDs
+-- actually resolve to and the biggest are literal placeholders ("Vacant Territory" 8,640
+-- accounts, "Hubspot Integration" 7,647), not real reps whose accounts are hiding behind a
+-- stale ID. Per Kevin: "forget about hubspot. we dont use hubspot anymore - everything shoulda
+-- been migrated." So an account with a legacy owner ID genuinely isn't properly assigned to
+-- anyone in the current system -- correctly excluded from every rep's book, not a lower bound
+-- that needs resolving. `book_size` here is accurate, not an undercount. Coverage = accounts
+-- with real Task/Meeting activity that specific month / book_size. Validated live: Cory
+-- Baach's real book is 52 accounts, coverage jumped from ~21-23% (Apr-Jun) to 79% (Jul) -- a
+-- real, meaningful behavior change, exactly the "what behaviors do they have" signal Kevin
+-- asked for.
 --
 -- Units/MSP/deal-type parts use HUBSPOT_DEAL_OWNER (name-string match, same basis as
 -- rep_leaderboard.sql) rather than OWNER_SK -- consistent with every other rolled-out-units
