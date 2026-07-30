@@ -22,6 +22,16 @@
 -- doesn't need it). Same dedup + departure-grace-period pattern as everywhere else in this
 -- repo. segment_bucket here is the broader bucket (includes House Accounts) -- team_bucket
 -- would exclude it, matching every other segment-level query in this repo.
+--
+-- CONNECTED TO THE TIME FILTER (added 2026-07-30) -- Kevin: "activities by segment should
+-- connect to the filter up top. i currently have this week selected but its still showing this
+-- month." Same {{ Granularity.value }} = 'Week' | 'Month' | 'Quarter' pattern as
+-- performance_cube.sql, but this query only returns the 2 relevant rows itself (labeled
+-- generically 'this_period'/'last_period') instead of returning all 9 period rows and relying
+-- on Superblocks to pick the right pair -- one less place for a binding to silently pick the
+-- wrong one. Uses PACING-matched comparators (last_period cut off at the same elapsed point as
+-- this_period) -- established rule elsewhere in this repo: activity metrics get a pacing
+-- comparison (a real day-by-day rhythm exists), unlike units/deals which don't.
 
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
@@ -29,15 +39,38 @@ WITH current_bp AS (
                DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
 ),
 bp_periods AS (
-    SELECT 'this_month' AS period,
+    SELECT 'this_period' AS period,
         DATEADD(day, 4, DATEADD(month, -1, bp_month_label)) AS start_date,
         LEAST(DATEADD(day, 3, bp_month_label), CURRENT_DATE()) AS end_date
-    FROM current_bp
+    FROM current_bp WHERE '{{ Granularity.value }}' = 'Month'
     UNION ALL
-    SELECT 'last_month_full',
+    SELECT 'last_period',
         DATEADD(day, 4, DATEADD(month, -2, bp_month_label)),
-        DATEADD(day, 3, DATEADD(month, -1, bp_month_label))
-    FROM current_bp
+        DATEADD(day,
+            DATEDIFF(day, DATEADD(day,4,DATEADD(month,-1,bp_month_label)), LEAST(DATEADD(day,3,bp_month_label), CURRENT_DATE())),
+            DATEADD(day, 4, DATEADD(month, -2, bp_month_label)))
+    FROM current_bp WHERE '{{ Granularity.value }}' = 'Month'
+    UNION ALL
+    SELECT 'this_period',
+        DATEADD(day, 4, DATEADD(month, -1, DATE_TRUNC('quarter', bp_month_label))),
+        LEAST(DATEADD(day, 3, DATEADD(month, 2, DATE_TRUNC('quarter', bp_month_label))), CURRENT_DATE())
+    FROM current_bp WHERE '{{ Granularity.value }}' = 'Quarter'
+    UNION ALL
+    SELECT 'last_period',
+        DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))),
+        DATEADD(day,
+            DATEDIFF(day, DATEADD(day,4,DATEADD(month,-1,DATE_TRUNC('quarter', bp_month_label))),
+                          LEAST(DATEADD(day,3,DATEADD(month,2,DATE_TRUNC('quarter', bp_month_label))), CURRENT_DATE())),
+            DATEADD(day, 4, DATEADD(month, -4, DATE_TRUNC('quarter', bp_month_label))))
+    FROM current_bp WHERE '{{ Granularity.value }}' = 'Quarter'
+    UNION ALL
+    SELECT 'this_period', DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE()
+    FROM current_bp WHERE '{{ Granularity.value }}' = 'Week'
+    UNION ALL
+    SELECT 'last_period',
+        DATE_TRUNC('week', CURRENT_DATE()) - 7,
+        (DATE_TRUNC('week', CURRENT_DATE()) - 7) + DATEDIFF(day, DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE())
+    FROM current_bp WHERE '{{ Granularity.value }}' = 'Week'
 ),
 emp_dedup AS (
     SELECT EMPLOYEE_SK, EMAIL
