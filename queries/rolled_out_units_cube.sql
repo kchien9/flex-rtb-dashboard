@@ -138,7 +138,17 @@ SELECT
     SUM(IFF(s.IS_NEW_ROLLOUT AND NOT s.IS_RECAPTURED_NEW_ROLLOUT
             AND NOT s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0))   AS new_units,
     SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0))               AS deactivated_units,
-    SUM(s.ROLLED_OUT_UNITS_MOM_CHANGE)                                  AS net_change_units
+    SUM(s.ROLLED_OUT_UNITS_MOM_CHANGE)                                  AS net_change_units,
+    -- 3-month trailing average of new_integrated_units, added 2026-07-30 -- same "was this
+    -- month decent, or just noisy" question as rolled_out_units_daily_trend.sql's rolling_avg_7d
+    -- (see that file's header for the full reasoning), just monthly grain here so a 3-month
+    -- window is the equivalent smoothing length. PARTITION BY the same 3 grouping columns this
+    -- query already groups by, so each segment/team/slice series gets its own independent
+    -- trailing average rather than blending unrelated series together.
+    AVG(SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)))
+        OVER (PARTITION BY s.segment_bucket, s.team_bucket, COALESCE({{ Dimension.value }}, 'Not Set')
+              ORDER BY DATE_TRUNC('month', s.BP_MONTH)
+              ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)               AS new_integrated_units_rolling_avg_3mo
 FROM base s
 LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
 LEFT JOIN deal_owner_status u ON u.FULL_NAME = s.HUBSPOT_DEAL_OWNER

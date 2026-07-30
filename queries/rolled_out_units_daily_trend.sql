@@ -35,6 +35,17 @@
 --
 -- Same DSMB exclusion, segment_bucket/team_bucket mapping, and filters as
 -- rolled_out_units_cube.sql -- stays consistent with every other rolled-out-units view.
+--
+-- 7-DAY TRAILING AVERAGE (added 2026-07-30) -- Kevin: "can we add like a avg line? or should
+-- it be a trending avg? basically a way of knowing if we had a decent day or not." A flat
+-- average over the whole window would get dragged around by the same spikes the header above
+-- already documents (one 36K-unit day from a single portfolio activation) -- not a stable
+-- baseline for "was today decent." A 7-day TRAILING average instead: smooths day-to-day/
+-- weekday noise (this data visibly has a weekly rhythm -- some days near zero) while still
+-- reacting to a real multi-day acceleration or slowdown, unlike a single flat number for the
+-- whole period. `rolling_avg_7d` computed here in SQL rather than left to Superblocks, same
+-- principle as `cumulative_units` already being server-computed -- one source of truth for the
+-- math, not reimplemented client-side.
 
 WITH date_spine AS (
     SELECT DATEADD(day, SEQ4(), DATEADD(day, -{{ LookbackDays.value }}, CURRENT_DATE())) AS day
@@ -92,7 +103,9 @@ SELECT
     COALESCE(d.recaptured_units, 0)                                      AS recaptured_units,
     COALESCE(d.new_units, 0) + COALESCE(d.recaptured_units, 0)           AS total_units,
     COALESCE(d.properties, 0)                                            AS properties,
-    SUM(COALESCE(d.new_units, 0) + COALESCE(d.recaptured_units, 0)) OVER (ORDER BY ds.day) AS cumulative_units
+    SUM(COALESCE(d.new_units, 0) + COALESCE(d.recaptured_units, 0)) OVER (ORDER BY ds.day) AS cumulative_units,
+    AVG(COALESCE(d.new_units, 0) + COALESCE(d.recaptured_units, 0))
+        OVER (ORDER BY ds.day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)                     AS rolling_avg_7d
 FROM date_spine ds
 LEFT JOIN daily d ON ds.day = d.day
 ORDER BY ds.day;
