@@ -110,3 +110,66 @@ FROM scoped
 WHERE segment_bucket IS NOT NULL
 GROUP BY 1, 2
 ORDER BY 1, 2;
+
+-- Part C: win rate by REP -- Kevin (2026-07-30): "conversion rate... rep level i think... of
+-- all open opportunities theyre owner of how many closed won" -- interpreted as the same win-
+-- rate definition as Part B (won / (won + lost), by deal count AND by units, same reasoning on
+-- why both), just re-grouped by owner instead of segment. If a straight win/loss rate isn't
+-- what was meant, flag it and this gets adjusted -- there wasn't a second obvious reading of
+-- "how many closed won" that wasn't just this.
+--
+-- REP RESOLVED VIA OWNER_SK, NOT A DEAL-LEVEL TEAM TAG -- this is "who owned THIS closed deal,"
+-- a real per-record fact (unlike STATIC_TEAM_NAME's known bulk-attribution artifacts on OPEN
+-- deals -- see pipeline_by_stage.sql's header) -- same resolution closed_won_by_rep.sql already
+-- uses and this repo confirmed correct.
+--
+-- DEPARTURE GRACE PERIOD APPLIED -- Kevin's standing rule: "i dont want to see inactive or
+-- users on entirely diff teams in any table." DIM_EMPLOYEE_HISTORY (used to resolve OWNER_SK ->
+-- a name) has no IS_ACTIVE/LAST_LOGIN_AT_UTC of its own, so team_bucket AND the grace-period
+-- check are resolved from STG_SALESFORCE__USER by FULL_NAME, same canonical pattern as
+-- rep_leaderboard.sql/team_rep_units_trend.sql -- not a second, inconsistent method.
+--
+-- No monthly trend here (unlike Part B's segment trend) -- at rep grain, a single BP month's
+-- closed-deal count per person is often in the single digits, which is exactly the small-
+-- sample noise this repo already flagged and excluded for the current partial month in Part B
+-- -- one trailing-window total per rep is the stable, meaningful number at this grain.
+WITH user_dedup AS (
+    SELECT FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+current_rep AS (
+    SELECT FULL_NAME,
+        CASE
+            WHEN TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND PARENT_TEAM = 'Mid Market +' THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket,
+        IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM user_dedup
+),
+rep_scoped AS (
+    SELECT o.*, e.FULL_NAME AS rep, cr.team_bucket
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE AND e.SOURCE_SYSTEM = 'salesforce'
+    JOIN current_rep cr ON cr.FULL_NAME = e.FULL_NAME AND cr.team_bucket IS NOT NULL
+    WHERE o.IS_CLOSED AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, CURRENT_DATE())
+      AND (cr.IS_ACTIVE OR cr.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
+      {{#Team.value}} AND cr.team_bucket = '{{Team.value}}' {{/Team.value}}
+)
+SELECT
+    rep,
+    team_bucket,
+    COUNT(*)                                                                     AS total_closed_deals,
+    SUM(IFF(IS_CLOSED_WON, 1, 0))                                                AS won_deals,
+    DIV0(SUM(IFF(IS_CLOSED_WON, 1, 0)), COUNT(*))                                AS win_rate_by_deals,
+    SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0))                    AS total_closed_units,
+    SUM(IFF(IS_CLOSED_WON, FLEX_UNIT_COUNT, 0))                                  AS won_units,
+    DIV0(SUM(IFF(IS_CLOSED_WON, FLEX_UNIT_COUNT, 0)), SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0))) AS win_rate_by_units
+FROM rep_scoped
+GROUP BY 1, 2
+HAVING total_closed_deals > 0
+ORDER BY win_rate_by_units DESC;
