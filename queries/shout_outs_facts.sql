@@ -95,15 +95,33 @@ leader_streak AS (
     WHERE is_leader = 1 AND BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
 ),
 personal_best AS (
-    -- BUG CAUGHT VALIDATING LIVE: an earlier draft computed prior_max_units with a window
+    -- BUG CAUGHT VALIDATING LIVE (#1): an earlier draft computed prior_max_units with a window
     -- function AFTER already filtering `monthly` down to only the current BP month -- so
     -- "BP_MONTH < current_max" was false for every remaining row, prior_max_units was always
     -- NULL, COALESCE(NULL,-1) made the comparison trivially true, and EVERY rep (including
     -- reps with 0 units) came back is_personal_best=TRUE. Fixed by aggregating across all 6
     -- months in one GROUP BY, before any filtering to "this month."
+    --
+    -- BUG CAUGHT VALIDATING LIVE (#2), per Kevin's own catch: a rep with only ONE month of
+    -- history EVER (a true new hire, e.g. Demri Williams/Shane Bierfeldt -- confirmed live,
+    -- both show a single BP_MONTH row total across the full 6-month lookback) had
+    -- prior_max_units = NULL -> COALESCE to -1 -> ANY positive number this month trivially
+    -- counted as a "personal best." That's not a real personal best, it's their only data
+    -- point -- calling it out would overstate a first month as an achievement. Fixed by
+    -- requiring at least 2 PRIOR months of real (non-null) history before the claim can be
+    -- TRUE (see prior_month_count below, used in the final SELECT's is_personal_best).
+    --
+    -- Note this is a *tenure* guard (does the rep have enough of their own history to make
+    -- "best" meaningful), separate from the *team-scoping* question Kevin also raised (should
+    -- a rep who moved from Brandon's to Dana's team have their pre-move months counted at
+    -- all) -- team_bucket here is resolved once per PERSON from current status (see
+    -- current_rep above), so a mover's full name-matched history already counts toward their
+    -- own personal best regardless of which team a given month's deals were nominally tagged
+    -- under -- that's deliberate, consistent with this repo's person-not-deal team rule.
     SELECT team_bucket, rep,
         MAX(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), units, NULL)) AS this_month_units,
-        MAX(IFF(BP_MONTH < (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), units, NULL)) AS prior_max_units
+        MAX(IFF(BP_MONTH < (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), units, NULL)) AS prior_max_units,
+        COUNT(IFF(BP_MONTH < (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), 1, NULL)) AS prior_month_count
     FROM monthly
     GROUP BY team_bucket, rep
 ),
@@ -121,15 +139,15 @@ SELECT
     COALESCE(pb.team_bucket, ls.team_bucket, nl.team_bucket) AS team,
     COALESCE(pb.rep, ls.rep, nl.rep)                          AS rep,
     COALESCE(ls.streak_len, 0)                                AS leader_streak_months,
-    -- Guard against a 0-unit "personal best" (e.g. a brand-new rep's first month with no
-    -- prior data at all) -- pb.this_month_units > 0 required, not just > their own history.
-    IFF(pb.this_month_units > 0 AND pb.this_month_units > COALESCE(pb.prior_max_units, -1), TRUE, FALSE) AS is_personal_best,
+    -- Guard against a 0-unit "personal best," AND against a true new hire's first month
+    -- trivially counting as one (prior_month_count >= 2 required -- see personal_best CTE).
+    IFF(pb.this_month_units > 0 AND pb.prior_month_count >= 2 AND pb.this_month_units > pb.prior_max_units, TRUE, FALSE) AS is_personal_best,
     pb.this_month_units,
     COALESCE(nl.new_logo_deals_this_month, 0)                 AS new_logo_deals_this_month
 FROM personal_best pb
 FULL OUTER JOIN leader_streak ls ON pb.team_bucket = ls.team_bucket AND pb.rep = ls.rep
 FULL OUTER JOIN new_logo nl ON COALESCE(pb.team_bucket, ls.team_bucket) = nl.team_bucket AND COALESCE(pb.rep, ls.rep) = nl.rep
 WHERE COALESCE(ls.streak_len, 0) > 0
-   OR IFF(pb.this_month_units > 0 AND pb.this_month_units > COALESCE(pb.prior_max_units, -1), TRUE, FALSE)
+   OR IFF(pb.this_month_units > 0 AND pb.prior_month_count >= 2 AND pb.this_month_units > pb.prior_max_units, TRUE, FALSE)
    OR COALESCE(nl.new_logo_deals_this_month, 0) >= 3
 ORDER BY team, leader_streak_months DESC, new_logo_deals_this_month DESC;
