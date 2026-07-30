@@ -163,6 +163,53 @@ with a single quantified at-risk-pipeline line if material, with no deal specifi
 presentation-layer instruction, not something `ai_summary_facts.sql` enforces — the query
 returns the facts, the prompt is responsible for scope discipline.
 
+## 4.6. Shout Outs / Celebrations (referenced by `shout_outs_facts.sql`, written down 2026-07-30)
+
+Kevin: "can we create a 'shout outs/celebrations' section? basically in the performance tab
+maybe above manager pods — some ai generated call outs for high performance... maybe actually
+do one message — and call out 1 person per team. Then sham can copy paste and drop into our
+org slack thread if he wants."
+
+**Placement**: Performance tab, above the manager pods — one combined block, not four separate
+widgets.
+
+**Output shape**: ONE Slack-ready message, one line per team (Brandon's/Rory's/Sebastian's/
+Dana's, 4 lines total), each featuring exactly one rep. Give Sham a "copy" affordance on the
+whole block.
+
+**Facts available** (`shout_outs_facts.sql`): per candidate rep — `leader_streak_months`,
+`is_personal_best` (vs. their own trailing 5 months), `this_month_units`,
+`new_logo_deals_this_month`. Not every rep on a team is a candidate — the query already filters
+to only those with a genuinely notable fact this period.
+
+**NON-NEGOTIABLE FRAMING RULE, verbatim from Kevin**: "do not ever shout out one person by
+putting down another. only focus on positive framing — big wins, positive trends, etc." The
+system prompt must say something like: "For each team, pick ONE featured rep from the provided
+candidates and write one celebratory sentence about what THEY achieved. Never mention, compare
+to, rank against, or imply anything about a teammate's performance — no 'beat everyone,' no
+'unlike last month,' no comparative language at all. If a team has zero candidates, skip that
+team's line entirely rather than inventing a reason to feature someone."
+
+**Selection guidance for the LLM** (not enforced in SQL — "most compelling" is a narrative
+judgment): prefer the fact with the most concrete, specific number — a multi-month streak beats
+a 1-month streak; a personal best is more specific than a generic good month; a high new-logo
+count is a fine substitute when neither of the other two is notable.
+
+## 4.7. Trend Team button removal (2026-07-30)
+
+Kevin: "can we remove the trend team button and when you click the pod the chart just appears
+above the table." `team_rep_units_trend.sql` already provides the per-rep monthly line-chart
+data for a pod (unchanged) — this is a pure UI wiring change, no new query. Remove the separate
+"Trend Team" button; wire the existing chart component to appear above the roster table
+whenever a manager pod is clicked, using the same `Team.value` the pod click already sets.
+
+## 4.8. Possible Departures removed (2026-07-30)
+
+Kevin: "possible departures lets just remove. they know who departed." Remove the "Possible
+Departures / Reassignments" section from the Coaching tab entirely. `possible_departures.sql`
+is marked DEPRECATED in its own header — delete the file once this section is confirmed removed
+from Superblocks.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)

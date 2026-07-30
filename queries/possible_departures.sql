@@ -1,3 +1,8 @@
+-- DEPRECATED 2026-07-30 -- Kevin: "possible departures lets just remove. they know who
+-- departed." Left in place only until the Superblocks "Possible Departures / Reassignments"
+-- section is unwired from it -- once that's done, delete this file. Do not build on top of
+-- this query or reference it from anything new.
+--
 -- Possible Departures -- org-wide, DEPARTED ONLY. Replaces an unvalidated Superblocks widget
 -- (2026-07-29) -- Kevin found a "Possible Departures / Reassignments" list on the Coaching tab
 -- flagging reps with "0 units for 3 consecutive months," which had Cory Baach, Doron David,
