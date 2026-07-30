@@ -139,10 +139,33 @@ bp_periods AS (
         (DATE_TRUNC('week', CURRENT_DATE()) - 7) + DATEDIFF(day, DATE_TRUNC('week', CURRENT_DATE()), CURRENT_DATE())
     FROM current_bp WHERE '{{ Granularity.value }}' = 'Week'
 ),
-deal_owner_status AS (
-    SELECT FULL_NAME, TEAM_NAME, IS_ACTIVE, LAST_LOGIN_AT_UTC
+-- TEAM MEMBERSHIP FROM THE PERSON, NOT THE DEAL (rebuilt 2026-07-30) -- same root cause and
+-- fix as rep_leaderboard.sql/rep_by_msp.sql/team_rep_units_trend.sql: a rep's CURRENT segment
+-- (from STG_SALESFORCE__USER.TEAM_NAME, PARENT_TEAM='Mid Market +' guard for Strategic)
+-- decides which segment's rep list they appear on, never their historical deals' own
+-- HUBSPOT_STATIC_TEAM_NAME_DEAL tag. Part A above stays on the deal-level tag on purpose --
+-- that's a legitimate segment-level TOTAL question ("how many units did deals tagged with
+-- this segment produce"), not a "which person is on this team" question -- the distinction
+-- that matters is listing individual reps, which only Part B does.
+user_dedup AS (
+    SELECT FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
     FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
     QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
+),
+current_rep AS (
+    SELECT
+        FULL_NAME,
+        TEAM_NAME AS team,
+        CASE
+            WHEN TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') AND PARENT_TEAM = 'Mid Market +' THEN 'Strategic'
+            WHEN TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN TEAM_NAME IS NULL THEN 'Not Set'
+            ELSE NULL
+        END AS segment_bucket,
+        IS_ACTIVE, LAST_LOGIN_AT_UTC
+    FROM user_dedup
 ),
 pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -152,32 +175,22 @@ pmc_size AS (
     GROUP BY 1
 ),
 base AS (
-    SELECT
-        s.*,
-        CASE
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'MM/Ent'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IS NULL THEN 'Not Set'
-            ELSE NULL
-        END AS segment_bucket
+    SELECT s.*
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     WHERE s.IS_NEW_INTEGRATED = TRUE AND s.ROLLOUT_DATE IS NOT NULL
 )
 SELECT
     p.period,
     b.HUBSPOT_DEAL_OWNER              AS rep,
-    u.TEAM_NAME                        AS team,
+    cr.team,
     SUM(b.PROPERTY_UNIT_COUNT)         AS units,
     COUNT(DISTINCT b.PROPERTY_ID)       AS properties
 FROM bp_periods p
 JOIN base b ON b.ROLLOUT_DATE BETWEEN p.start_date AND p.end_date
 LEFT JOIN pmc_size pm ON b.PMC_ID = pm.PMC_ID
-LEFT JOIN deal_owner_status u ON u.FULL_NAME = b.HUBSPOT_DEAL_OWNER
+JOIN current_rep cr ON cr.FULL_NAME = b.HUBSPOT_DEAL_OWNER
 WHERE (pm.pmc_current_units IS NULL OR pm.pmc_current_units > 750)
-  AND b.segment_bucket = '{{ Segment.value }}'
-  AND b.HUBSPOT_DEAL_OWNER IS NOT NULL
-  AND (u.FULL_NAME IS NULL OR u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
+  AND cr.segment_bucket = '{{ Segment.value }}'
+  AND (cr.IS_ACTIVE OR cr.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
 GROUP BY 1, 2, 3
 ORDER BY period, units DESC;
