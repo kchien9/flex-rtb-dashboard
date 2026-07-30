@@ -1,19 +1,17 @@
--- Activities & Outcomes, by Segment -- the top level of the segment -> team -> rep drill
--- Kevin asked for (same pattern rolled_out_units_cube.sql already uses). Five stages, side by
--- side, by segment, this month vs last month.
---
--- NO IMPLIED CAUSAL CHAIN (corrected 2026-07-30) -- this file originally framed the five
--- columns as a chain to "trace backward through" when one stage is down, implying each stage
--- causes the next. Kevin corrected this: "i think this activity to outcome table can be
--- deprecated bc we cant really create a causal chain... i just want to show total activities
--- and then the trends." Checked directly (see project memory): calls->meetings and
--- meetings->pipeline correlation at monthly-aggregate grain is weak and inconsistent (sometimes
--- negative) across all three segments -- there isn't a clean, provable lag to trace. This table
--- now does exactly what Kevin asked: show each stage's number and trend, side by side, and
--- let a human decide if a pattern is real -- not narrate a causal story the data doesn't
--- actually support. insights_activity_to_outcome.sql and insights_activity_correlation.sql
--- (both explicitly causal-framed) are deprecated in favor of this table + activities_by_team.sql
--- + activity_vs_outcome_by_rep.sql, at the segment/team/rep drill levels respectively.
+-- DEPRECATED 2026-07-30, SUPERSEDED ENTIRELY (not just reframed) -- Kevin, after an initial
+-- attempt to just remove the causal narrative text from this table: "remove the whole table bc
+-- we cannot show this causal chain at all. I just want segment then calls emails meetings
+-- demos." Even without narrative text, arranging SDR Calls/AE Meetings next to Pipeline
+-- Created/Closed Won/Rolled-Out Units in one row still visually implies a chain. Replaced by
+-- activities_by_segment.sql (pure Calls/Emails/Meetings/Demos, no outcome columns at all) for
+-- the Activities tab -- outcomes already have their own home on Deals & Units
+-- (performance_cube.sql) and Pipeline (rolled_out_units_cube.sql), no second appearance needed
+-- here. Leave this file in place until Superblocks unwires it, then delete.
+
+-- Full Funnel, by Segment -- the end-to-end chain Kevin originally described: "it starts w
+-- sdrs activity and that leads to meetings which create pipeline which lead to closed units
+-- which lead to rolled out units." Five stages, side by side, by segment, this month vs last
+-- month. Superseded per the note above -- kept only for reference.
 --
 -- SDR pods map cleanly onto the same 3 segments that have dedicated SDR support -- confirmed
 -- live: SMB SDRs, MM/Enterprise SDRs, Strategic SDRs (Deep SMB SDRs excluded, same DSMB

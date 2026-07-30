@@ -1,29 +1,22 @@
--- Activities, by Team -- the middle drill level Kevin asked for: "start w all the activities
--- by segment then similarly to the rolled out units table, you can click into the segment
--- which reveals the team and then rep level." full_funnel_by_segment.sql is the top (segment)
--- level; activity_vs_outcome_by_rep.sql (filtered by Team) is the bottom (rep) level; this is
--- the middle. Same stages, same this-vs-last trending, grouped by team_bucket instead of
--- segment_bucket.
+-- Activities, by Team -- the middle drill level: activities_by_segment.sql (top) -> this
+-- (middle) -> activity_vs_outcome_by_rep.sql filtered by Team (bottom). Same interaction
+-- pattern Rolled-Out Units already uses (click a segment row, reveals team, reveals rep).
 --
--- SDR CALLS DROPPED AT THIS LEVEL, ON PURPOSE -- checked live: SDR pods are segment-scoped,
--- not team-scoped (SMB SDRs/MM-Enterprise SDRs/Strategic SDRs -- no "Rory's SDRs" vs
--- "Sebastian's SDRs" split exists in Salesforce). Showing the same segment-level SDR number
--- twice under both Rory's Team and Sebastian's Team would look like a real team-level split
--- that doesn't exist -- dropped rather than faked. SDR Calls stays visible one level up, at
--- Segment, where it's real.
+-- REBUILT 2026-07-30 -- first version of this file mixed AE Meetings with Pipeline Created/
+-- Closed Won/Rolled-Out Units in one row. Kevin: "remove the whole table bc we cannot show
+-- this causal chain at all. I just want segment then calls emails meetings demos." Even
+-- without a causal narrative sentence, arranging activity and outcome columns left-to-right in
+-- funnel order still visually implies a chain -- fixed by dropping every outcome column
+-- entirely, not just the narrative text. This is now PURE activity: Calls/Emails/Meetings/
+-- Demos, same 4 metrics as activities_by_segment.sql, just grouped by team_bucket instead of
+-- segment_bucket. Outcomes live on Deals & Units / Pipeline, not here.
 --
--- NO IMPLIED CAUSAL CHAIN -- same correction as full_funnel_by_segment.sql's header (updated
--- alongside this file): this shows AE Meetings/Pipeline Created/Closed Won/Rolled-Out Units
--- side by side with a trend, full stop. Don't read a drop in one column as caused by a drop in
--- an earlier one -- the lag/correlation between these stages was checked directly (see
--- project memory) and found too weak and inconsistent at monthly-aggregate grain to support
--- that story. Per Kevin: "i just want to show total activities and then the trends... the
--- causal table is creating a causal chain that may not exist."
+-- Calls/emails/meetings/demos are whoever logged them rolled up to team (no SDR-pod split
+-- needed now that this isn't paired against AE-side outcomes) -- SDR pods are segment-scoped
+-- in Salesforce anyway (no "Rory's SDRs" vs "Sebastian's SDRs"), so a team-level SDR-specific
+-- cut still wouldn't be real even if this file wanted one.
 --
--- Same fan-out avoidance (each stage aggregated to its own grain in its own CTE before
--- joining), same deal-type scope (New Logo/Expansion/Move In), same DSMB exclusion on
--- Rolled-Out Units, same dedup/grace-period rep-status handling as everywhere else in this
--- repo.
+-- Same dedup + departure-grace-period pattern as everywhere else in this repo.
 
 WITH current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
@@ -65,70 +58,35 @@ team_map AS (
     JOIN user_dedup u ON ed.EMAIL = u.EMAIL
     WHERE u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE())
 ),
-ae_meetings AS (
-    SELECT p.period, e.team_bucket AS team, COUNT(DISTINCT m.MEETING_ID) AS ae_meetings
+tasks AS (
+    SELECT p.period, tm.team_bucket AS team,
+        COUNT(DISTINCT IFF(t.TASK_TYPE = 'call', t.TASK_ID, NULL))  AS calls,
+        COUNT(DISTINCT IFF(t.TASK_TYPE = 'email', t.TASK_ID, NULL)) AS emails
     FROM bp_periods p
-    JOIN FLEX.SALES.FCT_CRM_MEETING m ON m.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date
-        AND m.MEETING_STATUS = 'completed'
-    JOIN team_map e ON m.EMPLOYEE_SK = e.EMPLOYEE_SK AND e.team_bucket IS NOT NULL
+    JOIN FLEX.SALES.FCT_CRM_TASK t ON t.COMPLETED_AT_UTC BETWEEN p.start_date AND p.end_date AND t.TASK_STATUS = 'completed'
+    JOIN team_map tm ON t.EMPLOYEE_SK = tm.EMPLOYEE_SK AND tm.team_bucket IS NOT NULL
     GROUP BY 1, 2
 ),
-pipeline_created AS (
-    SELECT p.period, e.team_bucket AS team,
-        COUNT(DISTINCT IFF(o.CREATED_AT_UTC BETWEEN p.start_date AND p.end_date, o.OPPORTUNITY_ID, NULL)) AS pipeline_created
+meets AS (
+    SELECT p.period, tm.team_bucket AS team,
+        COUNT(DISTINCT IFF(m.MEETING_SUBTYPE = 'Sales | Demo', m.MEETING_ID, NULL)) AS demos,
+        COUNT(DISTINCT m.MEETING_ID)                                                 AS meetings
     FROM bp_periods p
-    JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON TRUE
-    JOIN team_map e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.team_bucket IS NOT NULL
-    WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+    JOIN FLEX.SALES.FCT_CRM_MEETING m ON m.STARTED_AT_UTC BETWEEN p.start_date AND p.end_date AND m.MEETING_STATUS = 'completed'
+    JOIN team_map tm ON m.EMPLOYEE_SK = tm.EMPLOYEE_SK AND tm.team_bucket IS NOT NULL
     GROUP BY 1, 2
-),
-closed_won AS (
-    SELECT p.period, e.team_bucket AS team,
-        SUM(IFF(o.IS_CLOSED_WON AND o.CLOSED_AT_UTC BETWEEN p.start_date AND p.end_date, o.FLEX_UNIT_COUNT, 0)) AS closed_won_units
-    FROM bp_periods p
-    JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON TRUE
-    JOIN team_map e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.team_bucket IS NOT NULL
-    WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
-    GROUP BY 1, 2
-),
-pmc_size AS (
-    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
-    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
-      AND IS_IN_NETWORK
-    GROUP BY 1
-),
-rolled_out AS (
-    SELECT
-        IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), 'this_month', 'last_month_full') AS period,
-        CASE
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'Brandon''s Team'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'SMB Account Executives 2' THEN 'Rory''s Team'
-            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
-            ELSE NULL
-        END AS team,
-        SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)) AS rolled_out_units
-    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
-    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
-    WHERE s.BP_MONTH >= DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-      AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-    GROUP BY 1, 2
-    HAVING team IS NOT NULL
 )
 SELECT
-    COALESCE(am.period, pc.period, cw.period, ro.period) AS period,
-    COALESCE(am.team, pc.team, cw.team, ro.team) AS team,
-    am.ae_meetings,
-    pc.pipeline_created,
-    cw.closed_won_units,
-    ro.rolled_out_units
-FROM ae_meetings am
-FULL OUTER JOIN pipeline_created pc ON am.period = pc.period AND am.team = pc.team
-FULL OUTER JOIN closed_won cw ON COALESCE(am.period, pc.period) = cw.period AND COALESCE(am.team, pc.team) = cw.team
-FULL OUTER JOIN rolled_out ro ON COALESCE(am.period, pc.period, cw.period) = ro.period AND COALESCE(am.team, pc.team, cw.team) = ro.team
+    COALESCE(tk.period, mt.period) AS period,
+    COALESCE(tk.team, mt.team)      AS team,
+    COALESCE(tk.calls, 0)           AS calls,
+    COALESCE(tk.emails, 0)          AS emails,
+    COALESCE(mt.meetings, 0)        AS meetings,
+    COALESCE(mt.demos, 0)           AS demos
+FROM tasks tk
+FULL OUTER JOIN meets mt ON tk.period = mt.period AND tk.team = mt.team
 {{#Segment.value}}
-WHERE COALESCE(am.team, pc.team, cw.team, ro.team) IN (
+WHERE COALESCE(tk.team, mt.team) IN (
     SELECT team_bucket FROM (
         SELECT 'Brandon''s Team' AS team_bucket, 'MM/Ent' AS segment_bucket UNION ALL
         SELECT 'Sebastian''s Team', 'SMB' UNION ALL
