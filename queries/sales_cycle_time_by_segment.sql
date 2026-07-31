@@ -119,6 +119,17 @@ rollout AS (
     WHERE ROLLOUT_MONTH IS NOT NULL
     GROUP BY 1
 ),
+pmc_size AS (
+    -- DSMB EXCLUSION ADDED 2026-07-31 -- had no account-size filter -- caught in a repo-wide
+    -- DSMB audit. Lower severity than a SUM-based metric (this file already flags small-sample
+    -- medians as a real caveat), but a DSMB deal can still shift a thin-sample median -- same
+    -- Pattern B pmc_size join as everywhere else.
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
 deals AS (
     SELECT o.OPPORTUNITY_ID, o.CRM_ACCOUNT_SK, o.CLOSED_AT_UTC, o.OPPORTUNITY_TYPE AS deal_type,
         LAG(o.CLOSED_AT_UTC) OVER (PARTITION BY o.CRM_ACCOUNT_SK ORDER BY o.CLOSED_AT_UTC) AS prev_close,
@@ -130,7 +141,10 @@ deals AS (
             ELSE NULL
         END AS segment_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion')
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
 ),
 first_touch AS (
     SELECT
