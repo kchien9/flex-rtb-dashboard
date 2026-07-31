@@ -37,39 +37,72 @@
 -- Units/MSP/deal-type parts use HUBSPOT_DEAL_OWNER (name-string match, same basis as
 -- rep_leaderboard.sql) rather than OWNER_SK -- consistent with every other rolled-out-units
 -- query in this repo, and avoids re-deriving a different rep-identity join per part.
+--
+-- DSMB EXCLUSION ADDED 2026-07-31 (Parts A/B/C only) -- these sum PROPERTY_UNIT_COUNT and
+-- should tie back to rep_leaderboard.sql's own (already DSMB-excluded) total for the same rep;
+-- caught in a repo-wide DSMB audit. Parts D/E (activity, book-of-business) are NOT unit totals
+-- -- a DSMB account is still legitimately part of a rep's real book/activity, same exemption
+-- as activities_by_segment.sql -- left unchanged.
 
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 -- Part A: units trend
 SELECT
-    BP_MONTH,
-    SUM(IFF(IS_NEW_INTEGRATED, PROPERTY_UNIT_COUNT, 0)) AS new_integrated_units
-FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-WHERE HUBSPOT_DEAL_OWNER = '{{ Rep.value }}'
-  AND BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    s.BP_MONTH,
+    SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)) AS new_integrated_units
+FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+WHERE s.HUBSPOT_DEAL_OWNER = '{{ Rep.value }}'
+  AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+  AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
 GROUP BY 1
 ORDER BY 1;
 
 -- Part B: MSP mix trend
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 SELECT
-    BP_MONTH,
-    PMS AS msp,
-    SUM(PROPERTY_UNIT_COUNT) AS units
-FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-WHERE HUBSPOT_DEAL_OWNER = '{{ Rep.value }}'
-  AND IS_NEW_INTEGRATED
-  AND PMS IS NOT NULL
-  AND BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    s.BP_MONTH,
+    s.PMS AS msp,
+    SUM(s.PROPERTY_UNIT_COUNT) AS units
+FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+WHERE s.HUBSPOT_DEAL_OWNER = '{{ Rep.value }}'
+  AND s.IS_NEW_INTEGRATED
+  AND s.PMS IS NOT NULL
+  AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+  AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
 GROUP BY 1, 2
 ORDER BY 1, 2;
 
 -- Part C: deal-type mix trend
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 SELECT
-    BP_MONTH,
-    HUBSPOT_DEAL_TYPE AS deal_type,
-    SUM(PROPERTY_UNIT_COUNT) AS units
-FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-WHERE HUBSPOT_DEAL_OWNER = '{{ Rep.value }}'
-  AND IS_NEW_INTEGRATED
-  AND BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    s.BP_MONTH,
+    s.HUBSPOT_DEAL_TYPE AS deal_type,
+    SUM(s.PROPERTY_UNIT_COUNT) AS units
+FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+WHERE s.HUBSPOT_DEAL_OWNER = '{{ Rep.value }}'
+  AND s.IS_NEW_INTEGRATED
+  AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+  AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
 GROUP BY 1, 2
 ORDER BY 1, 2;
 
