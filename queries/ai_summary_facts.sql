@@ -133,6 +133,11 @@ LIMIT 3;
 -- taxonomy situation as everywhere else in this repo, not a new problem.
 -- NO MSP FILTER on Parts C/D -- deal-grain MSP is the same dirty field
 -- performance_cube.sql already dropped it for; don't reintroduce it here.
+--
+-- DSMB EXCLUSION ADDED 2026-07-31 -- Parts A/B/E already had the pmc_size join, but C/D didn't
+-- -- caught in a repo-wide DSMB audit. These feed the AI narration directly (a "biggest deal"
+-- or funnel-lag callout could be DSMB-driven). Same Pattern B pmc_size join as
+-- performance_cube.sql, added to both parts below.
 -- ================================================================================
 
 -- Part C: biggest single deal in scope this period, AND what share of the scope's
@@ -143,7 +148,14 @@ LIMIT 3;
 -- 14,420 units, 13.4% of Strategic's total -- notable but not dominant. Compare to
 -- Part B's Dana's-Team-by-rep example where one rep WAS ~60% -- different pattern,
 -- and the summary should describe them differently, not with the same template.
-WITH scoped AS (
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+scoped AS (
     SELECT
         o.OPPORTUNITY_NAME, o.FLEX_UNIT_COUNT, o.CLOSED_AT_UTC,
         CASE
@@ -162,9 +174,12 @@ WITH scoped AS (
             ELSE NULL
         END AS team_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
       AND o.FLEX_UNIT_COUNT IS NOT NULL
       AND o.CLOSED_AT_UTC >= DATEADD(month, -1, CURRENT_DATE())
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       {{#Team.value}}     AND team_bucket = '{{Team.value}}'          {{/Team.value}}
       {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
       {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
@@ -202,6 +217,13 @@ bp_periods AS (
     UNION ALL
     SELECT 'two_months_ago', DATEADD(day, 4, DATEADD(month, -3, bp_month_label)), DATEADD(day, 3, DATEADD(month, -2, bp_month_label)) FROM current_bp
 ),
+pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
 scoped AS (
     SELECT o.*,
         CASE
@@ -220,7 +242,10 @@ scoped AS (
             ELSE NULL
         END AS team_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       {{#Team.value}}     AND team_bucket = '{{Team.value}}'          {{/Team.value}}
       {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
       {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
