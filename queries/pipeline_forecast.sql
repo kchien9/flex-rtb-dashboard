@@ -22,7 +22,20 @@
 -- used everywhere else) instead -- meaningfully better coverage, though still real gaps
 -- (~700 of the ~840 August-expected deals still show no current owner/team -- flagging, not
 -- hiding, via the "Not Set" bucket below).
+--
+-- DSMB EXCLUSION ADDED 2026-07-31 -- neither Part A nor Part B had ANY account-size filter --
+-- caught in a repo-wide DSMB audit per Kevin's explicit ask. These are the headline forward-
+-- looking "Road Ahead" numbers, exactly the kind of total a DSMB account could quietly inflate.
+-- Same Pattern B pmc_size join as performance_cube.sql (via DIM_CRM_ACCOUNT_HISTORY.PMC_ID),
+-- applied to all three underlying queries below (Part A, and both of Part B's subqueries).
 
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 SELECT
     DATE_TRUNC('month', o.ANTICIPATED_GO_LIVE_AT_UTC)                          AS expected_month,
     COALESCE(
@@ -38,9 +51,12 @@ SELECT
     SUM(o.FLEX_UNIT_COUNT)                                                     AS pipeline_units
 FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
 WHERE NOT o.IS_CLOSED
   AND o.ANTICIPATED_GO_LIVE_AT_UTC >= CURRENT_DATE()
   AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+  AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   {{#Team.value}} AND COALESCE(
         CASE
             WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
@@ -74,6 +90,13 @@ ORDER BY 1, 2, 3;
 -- series on the same chart, don't blend them into one undifferentiated bar -- the near-term
 -- number is meaningfully more trustworthy than the far-term one, and Sham should be able to
 -- see that at a glance.
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 SELECT
     COALESCE(c.expected_month, p.expected_month)     AS expected_month,
     COALESCE(c.units, 0)                             AS closed_awaiting_rollout_units,
@@ -86,18 +109,24 @@ FROM (
         SUM(li.UNIT_COUNT) AS units, COUNT(*) AS properties
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
     JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED_WON
       AND li.ROLLOUT_MONTH > CURRENT_DATE()
       AND li.ROLLOUT_MONTH <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
     GROUP BY 1
 ) c
 FULL OUTER JOIN (
     SELECT DATE_TRUNC('month', o.ANTICIPATED_GO_LIVE_AT_UTC) AS expected_month,
         SUM(o.FLEX_UNIT_COUNT) AS units, COUNT(*) AS deals
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE NOT o.IS_CLOSED
       AND o.ANTICIPATED_GO_LIVE_AT_UTC > CURRENT_DATE()
       AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
     GROUP BY 1
 ) p ON c.expected_month = p.expected_month
 ORDER BY 1;
