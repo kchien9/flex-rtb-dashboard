@@ -163,6 +163,8 @@ with a single quantified at-risk-pipeline line if material, with no deal specifi
 presentation-layer instruction, not something `ai_summary_facts.sql` enforces — the query
 returns the facts, the prompt is responsible for scope discipline.
 
+**Style**: bullets, plain language, no unexplained jargon — see §4.11, applies here too.
+
 ## 4.6. Shout Outs / Celebrations (referenced by `shout_outs_facts.sql`, written down 2026-07-30)
 
 Kevin: "can we create a 'shout outs/celebrations' section? basically in the performance tab
@@ -195,6 +197,8 @@ judgment): prefer the fact with the most concrete, specific number — a multi-m
 a 1-month streak; a personal best is more specific than a generic good month; a high new-logo
 count is a fine substitute when neither of the other two is notable.
 
+**Style**: bullets, plain language, no unexplained jargon — see §4.11, applies here too.
+
 ## 4.7. Trend Team button removal (2026-07-30)
 
 Kevin: "can we remove the trend team button and when you click the pod the chart just appears
@@ -209,6 +213,86 @@ Kevin: "possible departures lets just remove. they know who departed." Remove th
 Departures / Reassignments" section from the Coaching tab entirely. `possible_departures.sql`
 is marked DEPRECATED in its own header — delete the file once this section is confirmed removed
 from Superblocks.
+
+## 4.9. Activities tab, with SDRs (new tab, written down 2026-07-31)
+
+Kevin: "we need to layer in sdrs now. and see how sdr activities leads to pipeline —
+where should that go?" There was no dedicated Activities tab before this — the activity
+queries existed but weren't assigned a named tab in the build order. This tab is that
+home, and it's also where SDR activity gets its first real appearance in this dashboard.
+
+**Real bug found and fixed getting here**: `activities_by_segment.sql`'s own header used
+to claim SDR activity was already included ("whoever logged them, SDR or AE alike"). It
+wasn't — the team-mapping CASE only recognized AE pod names, so every SDR employee
+resolved to a NULL bucket and was silently dropped by the join filter. Fixed by mapping
+the 3 real SDR pods (Strategic/MM+Enterprise/SMB SDRs — segment-scoped only, no
+team-level SDR split exists) and adding a `role` column (`AE`/`SDR`).
+
+**Placement and content**:
+- `activities_by_segment.sql` (now role-split) and `activities_by_team.sql` (AE-only,
+  unchanged — correctly scoped already, SDR has no team-level split to show) — bind
+  charts so AE and SDR bars are visually distinct, never stacked into one undifferentiated
+  total (same "show separately" rule as New vs. Recaptured units elsewhere in this repo).
+- `sdr_activity_to_pipeline.sql` — SDR calls trended against New Logo pipeline created, by
+  segment. **Show `sdr_headcount` next to the calls number, always** — Strategic SDRs is
+  currently ONE person (Louis Trujillo), so that segment's line is literally one person's
+  day-to-day activity, not a team signal. A viewer who doesn't see the headcount will
+  misread his PTO as "Strategic SDR activity collapsed."
+- **Label this a correlation, not attribution**, in the UI copy itself, not just this doc —
+  re-validated live that only ~11% of New Logo opportunities resolve to a real named SDR,
+  so this shows SDR-pod activity next to AE-segment pipeline, never a claim that a specific
+  SDR sourced a specific deal.
+- No SDR quota/target field exists anywhere in this repo (confirmed via full-repo grep) —
+  this tab shows activity volume and trend only. Don't add a progress-bar-to-target
+  treatment; there's no target to show progress against yet.
+
+## 4.10. Debrief tab (new tab, written down 2026-07-31)
+
+Kevin: "can we create a tab where he can just go into and learn everything that's
+happening — click a segment/MSP/team button, filter by time horizon/deal type/unit type,
+and get trends, wins, concerning things, and — if a team's selected — the individual
+drivers behind it." Confirmed buildable — most of the backend already exists and already
+accepts this dashboard's standard filter surface; this is mostly an integration + prompt
+task, not a new data build.
+
+**Dimension selector**: Segment / MSP / Team — mutually exclusive, pick one primary lens.
+**Deal Type** (New Logo/Expansion/Move In) and **Unit Type** (new vs. recaptured) are
+refinement filters layered on top, not additional primary lenses — Unit Type only applies
+to rolled-out-units facts, Deal Type only to deal-grain facts, so grey one out (or hide it)
+depending which primary lens and which underlying facts are active. **Time horizon** (This
+Week/Month/Quarter) is always active, same period pattern as every other tab.
+
+**Dispatch logic** (Superblocks-side — no new query needed for this part):
+- Segment or Team selected → `ai_summary_facts.sql` (all parts) for the headline, plus (Team
+  only) `debrief_facts_team.sql` for individual drivers.
+- MSP selected → `ai_summary_facts_msp.sql`.
+- Deal Type / Unit Type pass straight through as the `{{ DealType.value }}` / (new) unit-type
+  filter params these queries already accept — no new plumbing.
+
+**New file `debrief_facts_team.sql`** — the one real gap: per-rep unit trend + win rate +
+streak/personal-best facts, pre-filtered to one team, so the LLM narrates from one coherent
+fact set instead of stitching 3 separate query outputs together itself. Deliberately does
+NOT compute a team-level total (that's `ai_summary_facts.sql`'s job already) — don't let the
+Debrief prompt receive two different "team total" numbers to reconcile.
+
+**Same discipline as the main AI Summary applies here too**: no named deal/account-level
+risk callouts, quantified-only forward-looking flags, never let a data-hygiene artifact read
+as a business signal, and — same non-negotiable rule as Shout Outs — never a Debrief bullet
+that implies one teammate underperformed relative to another.
+
+## 4.11. Punchy, accessible AI summaries — style rule for ALL narration (written down 2026-07-31)
+
+Kevin: "can we make it such that anyone from outside the organization can understand what
+it's saying? I think we need to focus on punchy impactful bullets rather than paragraphs."
+This is a system-prompt change, not a SQL change — apply it to every LLM narration step in
+this dashboard: the main AI Summary (§4.5), MTR Bullets (`mtr_bullets.sql`), Shout Outs
+(§4.6), and the new Debrief tab (§4.10). Write it once here, reference it from each:
+
+- **Bullets, never paragraphs** — one line per point.
+- **No unexplained internal jargon** — "BP month," "NAR," "DSMB," "MSP" either get spelled
+  out inline on first use or get replaced with plain English. Someone outside Flex who's
+  never seen this dashboard should be able to follow every line without a glossary.
+- **Short, declarative sentences.** Cut qualifiers that don't change the decision.
 
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
