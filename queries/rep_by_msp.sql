@@ -23,8 +23,32 @@
 -- rep_leaderboard.sql exactly (cross-checked, ties out).
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
+--
+-- TREND_FLAG + PCT_CHANGE ADDED 2026-07-31 -- Sham wants an icon/%-change signal on this table,
+-- but per Kevin's own flag, this table is already dense (This + Last = 2 columns per MSP,
+-- times up to 9 MSPs). Computed here rather than left for Superblocks to derive so the UI
+-- binds to a real value instead of guessing a formula in the presentation layer.
+--
+-- `trend_flag` is the thing to bind an icon to ('up'/'down'/'new'/'dropped'/'flat') -- NOT
+-- `pct_change` directly, because a raw % is meaningless or wildly misleading at the small-base
+-- end of this table (e.g. Ariel Kurek's RealPage: 597 -> 0 this month is a real, complete drop-
+-- off, but "-100%" reads the same as any other -100% regardless of whether the base was 597 or
+-- 5). 'new' (last=0, this>0) and 'dropped' (this=0, last>0) get their own flag specifically so
+-- the UI can show a badge ("New" / "Dropped") instead of an undefined-or-nonsensical
+-- percentage. `pct_change` is only meaningful (and only non-NULL) for the plain 'up'/'down'
+-- case where both periods have a real base to compare against.
+--
+-- INTENDED UI TREATMENT (Superblocks side, not enforced here): collapse the existing "This" +
+-- "Last" columns into ONE column -- bold `units_this`, small icon keyed to `trend_flag`
+-- (filled triangle up/down in status color, not categorical color; a neutral "New"/"Dropped"
+-- badge for those two cases), muted `pct_change` next to the icon only when it's non-NULL.
+-- `units_last` stays available for a tooltip on hover, not as its own visible column -- this
+-- nets FEWER visible columns than today even after adding the new signal, which is the actual
+-- fix for "too many cells," not an addition on top of the current layout.
 
-WITH pmc_size AS (
+WITH base AS (
+    SELECT * FROM (
+    WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
@@ -77,4 +101,22 @@ WHERE s.BP_MONTH >= DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANA
   {{#Segment.value}}  AND cr.segment_bucket = '{{Segment.value}}' {{/Segment.value}}
 GROUP BY 1, 2, 3, 4
 HAVING units_this > 0 OR units_last > 0
+    )
+)
+SELECT
+    rep,
+    msp,
+    segment_bucket,
+    team_bucket,
+    units_this,
+    units_last,
+    CASE
+        WHEN units_last = 0 AND units_this > 0 THEN 'new'
+        WHEN units_this = 0 AND units_last > 0 THEN 'dropped'
+        WHEN units_this > units_last THEN 'up'
+        WHEN units_this < units_last THEN 'down'
+        ELSE 'flat'
+    END AS trend_flag,
+    IFF(units_last > 0 AND units_this > 0, DIV0(units_this - units_last, units_last), NULL) AS pct_change
+FROM base
 ORDER BY rep, units_this DESC;
