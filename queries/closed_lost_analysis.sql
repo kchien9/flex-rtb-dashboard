@@ -37,25 +37,39 @@
 
 -- Part A: loss reasons, trailing {{ LookbackMonths.value }} months (default 6), this vs. an
 -- equal-length prior window, categorized.
-WITH reasons AS (
+--
+-- DSMB EXCLUSION ADDED 2026-07-31 (all 3 parts) -- none of them had any account-size filter,
+-- caught in a repo-wide DSMB audit per Kevin's explicit ask. Same Pattern B pmc_size join as
+-- performance_cube.sql (via DIM_CRM_ACCOUNT_HISTORY.PMC_ID).
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+reasons AS (
     SELECT
-        CLOSED_LOST_REASON,
+        o.CLOSED_LOST_REASON,
         CASE
-            WHEN CLOSED_LOST_REASON IN (
+            WHEN o.CLOSED_LOST_REASON IN (
                 'Auto Close - Inactivity', 'Auto Close - Pipeline Cleanup', 'Duplicate Opportunity',
                 'Duplicate Account', 'Stale Deal/Migration'
             ) THEN TRUE
             ELSE FALSE
         END AS is_administrative,
-        FLEX_UNIT_COUNT,
-        IFF(CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, CURRENT_DATE()), 'current_window', 'prior_window') AS window
-    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY
-    WHERE IS_CLOSED AND NOT IS_CLOSED_WON AND OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
-      AND CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }} * 2, CURRENT_DATE())
+        o.FLEX_UNIT_COUNT,
+        IFF(o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, CURRENT_DATE()), 'current_window', 'prior_window') AS window
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
+    WHERE o.IS_CLOSED AND NOT o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }} * 2, CURRENT_DATE())
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       {{#Segment.value}} AND CASE
-            WHEN STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-            WHEN STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-            WHEN STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
             ELSE NULL
         END = '{{Segment.value}}' {{/Segment.value}}
 )
@@ -71,7 +85,14 @@ GROUP BY 1, 2
 ORDER BY units_this_window DESC;
 
 -- Part B: win rate by segment, monthly, fully-elapsed BP months only.
-WITH current_bp AS (
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
                DATE_TRUNC('month', CURRENT_DATE()),
                DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
@@ -84,12 +105,16 @@ scoped AS (
             WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
             ELSE NULL
         END AS segment_bucket
-    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o, current_bp
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    CROSS JOIN current_bp
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
       AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, current_bp.bp_month_label)
       -- fully-elapsed BP months only: a closed month counts once its own BP window has fully
       -- passed (i.e. strictly before the CURRENT BP month), not the in-progress one
       AND DATE_TRUNC('month', o.CLOSED_AT_UTC) < current_bp.bp_month_label
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       {{#Segment.value}} AND CASE
             WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
             WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
@@ -133,7 +158,14 @@ ORDER BY 1, 2;
 -- closed-deal count per person is often in the single digits, which is exactly the small-
 -- sample noise this repo already flagged and excluded for the current partial month in Part B
 -- -- one trailing-window total per rep is the stable, meaningful number at this grain.
-WITH user_dedup AS (
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+user_dedup AS (
     SELECT FULL_NAME, TEAM_NAME, PARENT_TEAM, IS_ACTIVE, LAST_LOGIN_AT_UTC
     FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
     QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
@@ -155,9 +187,12 @@ rep_scoped AS (
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE AND e.SOURCE_SYSTEM = 'salesforce'
     JOIN current_rep cr ON cr.FULL_NAME = e.FULL_NAME AND cr.team_bucket IS NOT NULL
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
       AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, CURRENT_DATE())
       AND (cr.IS_ACTIVE OR cr.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       {{#Team.value}} AND cr.team_bucket = '{{Team.value}}' {{/Team.value}}
 )
 SELECT
