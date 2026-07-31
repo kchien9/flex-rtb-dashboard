@@ -42,8 +42,19 @@
 -- directly -- drops departed-beyond-{{ GraceMonths.value }} reps and Saba Obaid-style stray
 -- records from the rep-level rows entirely, same tradeoff as everywhere else in this repo
 -- (segment/team totals shrink by whatever that rep's stale volume was, which is the right call).
+--
+-- DSMB EXCLUSION ADDED 2026-07-31 -- this drill-down had no account-size filter at all, unlike
+-- its parent card performance_cube.sql -- caught in a repo-wide DSMB audit. Pattern B pmc_size
+-- join via DIM_CRM_ACCOUNT_HISTORY.PMC_ID.
 
-WITH current_bp AS (
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+current_bp AS (
     SELECT IFF(DAY(CURRENT_DATE()) <= 4,
                DATE_TRUNC('month', CURRENT_DATE()),
                DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
@@ -114,10 +125,13 @@ base AS (
         m.segment_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     LEFT JOIN team_map m ON o.OWNER_SK = m.EMPLOYEE_SK
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
       -- departed-rep exclusion: keep if no employee match at all (preserve as before, don't
       -- punish a join miss), OR currently active, OR inactive but within the grace window
       AND (m.FULL_NAME IS NULL OR m.IS_ACTIVE OR m.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
 )
 SELECT
     p.period,
