@@ -41,6 +41,9 @@ lower priority — built and committed, but not blocking this week's work.**
 | `queries/activity_cube.sql` | Calls/Emails/Meetings/Demos, by rep and period | Calls/Emails via `FCT_CRM_TASK`, Demos via `MEETING_SUBTYPE = 'Sales \| Demo'`; caught a real join-fan-out bug building this, see file header |
 | `queries/pipeline_forecast.sql` | "The Road Ahead" — open pipeline by expected go-live month | Deliberately unweighted (no stage win-rate data to weight against yet — see `project_pipeline_win_rates.md`); real coverage gap on team attribution, flagged in file |
 | `queries/insights_activity_to_outcome.sql` | Rep-level meeting pacing + New Logo meetings-vs-units trend | Meeting→opportunity attribution is approximate (same-account, ±45 days) — stated plainly, not hidden |
+| `queries/activities_by_segment.sql` | Activities tab — Calls/Emails/Meetings/Demos, by segment, split AE vs. SDR | **Fixed 2026-07-31**: header used to claim SDR activity was included, code silently dropped it — now real, see `role` column |
+| `queries/sdr_activity_to_pipeline.sql` | Activities tab — SDR calls trended against New Logo pipeline created, by segment | Correlation not attribution (only ~11% of New Logo opps resolve to a real named SDR) — shows `sdr_headcount` alongside calls (Strategic SDRs is 1 person) |
+| `queries/debrief_facts_team.sql` | Debrief tab — per-rep unit trend + win rate + streak/personal-best, one team at a time | Individual-drivers layer; team-level headline stays `ai_summary_facts.sql`'s job, not duplicated here |
 
 **Two open items blocking full build-out of the newest features — need Kevin's input, can't get these from Snowflake:**
 1. **Spiff/intervention dates** (e.g. "we dropped a team spiff to push toward RealPage") aren't in Snowflake anywhere — `insights_mix_shift.sql`'s trend needs a manual annotation for when an intervention started, supplied by Kevin, not derived from data.
@@ -51,7 +54,7 @@ lower priority — built and committed, but not blocking this week's work.**
 | File | What it is | Status |
 |---|---|---|
 | `queries/mtr_bullets.sql` | Auto-drafted "biggest win" bullets for Sham's MTR doc | Built, works, not urgent |
-| `queries/oneonone_prep.sql` | Per-manager team trend + departure detection, for Sham's 1:1s with Brandon/Dana/Rory/Sebastian/Hans | Built, works for Brandon/Rory/Sebastian pods. Dana's pod name and Hans's SDR-side equivalent still unresolved — pick back up later |
+| `queries/oneonone_prep.sql` | Per-manager team trend + departure detection, for Sham's 1:1s with Brandon/Dana/Rory/Sebastian/Hans | Built, works for Brandon/Rory/Sebastian/Dana pods. Hans's SDR-side equivalent is now covered separately by the Activities tab (`sdr_activity_to_pipeline.sql`), not this file — this file stays units-side only |
 
 ## Before you wire anything up — must-fix items
 
