@@ -31,15 +31,28 @@
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo (not currently an
 -- issue for MSP values, but {{Segment.value}}/{{DealType.value}} below still carry it).
+--
+-- DSMB EXCLUSION ADDED 2026-07-31 -- had no account-size filter at all -- caught in a repo-wide
+-- DSMB audit. Pattern B pmc_size join via DIM_CRM_ACCOUNT_HISTORY.PMC_ID.
 
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 SELECT
     COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set') AS msp,
     COUNT(*)                                            AS new_opportunities,
     SUM(o.FLEX_UNIT_COUNT)                              AS new_pipeline_units
 FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
 LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.IS_CURRENT = TRUE
+LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
 WHERE o.OPPORTUNITY_ID LIKE '006%'
   AND o.CREATED_AT_UTC >= DATEADD(month, -{{ NewOppsMonths.value }}, CURRENT_DATE())
+  AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   AND CASE
         WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
         WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
