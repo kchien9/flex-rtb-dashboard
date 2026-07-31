@@ -39,20 +39,39 @@
 -- rep_leaderboard.sql. NOT applying the grace-period exclusion here on purpose -- this file's
 -- entire point is to SHOW departed/reassigned status as 1:1 context, not hide it.
 
+-- DSMB EXCLUSION ADDED 2026-07-31 -- neither part had any account-size filter -- caught in a
+-- repo-wide DSMB audit. This feeds Sham's manager 1:1 numbers directly. Pattern A pmc_size CTE.
+
 -- Part A: team-level trend, per manager's pod -- the headline number for the 1:1
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+)
 SELECT
     '{{ PodName.value }}'                                                AS pod,
-    SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
-            AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))            AS units_this,
-    SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-            AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))            AS units_last
-FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-WHERE HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}';
+    SUM(IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+            AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))            AS units_this,
+    SUM(IFF(s.BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+            AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))            AS units_last
+FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+WHERE s.HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}'
+  AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750);
 
 -- Part B: per-rep breakdown within the pod, classified current vs. departed/reassigned --
 -- the "why" behind Part A's number, and specifically what to flag as headcount context
 -- rather than a performance concern.
-WITH user_dedup AS (
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+user_dedup AS (
     SELECT FULL_NAME, TEAM_NAME, IS_ACTIVE
     FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
     QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
@@ -70,13 +89,15 @@ SELECT
         ELSE 'still on team'
     END                                                                   AS status
 FROM (
-    SELECT HUBSPOT_DEAL_OWNER AS rep,
-        SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
-                AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))         AS units_this,
-        SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-                AND IS_INTEGRATED_TOTAL, PROPERTY_UNIT_COUNT, 0))         AS units_last
-    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
-    WHERE HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}'
+    SELECT s.HUBSPOT_DEAL_OWNER AS rep,
+        SUM(IFF(s.BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+                AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))         AS units_this,
+        SUM(IFF(s.BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+                AND s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))         AS units_last
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE s.HUBSPOT_STATIC_TEAM_NAME_DEAL = '{{ PodName.value }}'
+      AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
     GROUP BY 1
     HAVING units_this > 0 OR units_last > 0
 ) r
