@@ -287,39 +287,69 @@ team-level SDR split exists) and adding a `role` column (`AE`/`SDR`).
   this tab shows activity volume and trend only. Don't add a progress-bar-to-target
   treatment; there's no target to show progress against yet.
 
-## 4.10. Debrief tab (new tab, written down 2026-07-31)
+## 4.10. Debrief (left-nav item, not a tab — restructured 2026-08-04)
 
 Kevin: "can we create a tab where he can just go into and learn everything that's
 happening — click a segment/MSP/team button, filter by time horizon/deal type/unit type,
 and get trends, wins, concerning things, and — if a team's selected — the individual
-drivers behind it." Confirmed buildable — most of the backend already exists and already
-accepts this dashboard's standard filter surface; this is mostly an integration + prompt
-task, not a new data build.
+drivers behind it." Most of the backend already exists and already accepts this
+dashboard's standard filter surface; this is mostly an integration + prompt task, not a
+new data build.
 
-**Dimension selector**: Segment / MSP / Team — mutually exclusive, pick one primary lens.
-**Deal Type** (New Logo/Expansion/Move In) and **Unit Type** (new vs. recaptured) are
-refinement filters layered on top, not additional primary lenses — Unit Type only applies
-to rolled-out-units facts, Deal Type only to deal-grain facts, so grey one out (or hide it)
-depending which primary lens and which underlying facts are active. **Time horizon** (This
-Week/Month/Quarter) is always active, same period pattern as every other tab.
+**PLACEMENT (changed 2026-08-04)**: Debrief moves OFF the top tab bar (Deals & Units /
+Pipeline / Activities / Segment × MSP / Trends & Insights / Watch List) and becomes its
+own **left-sidebar entry**, alongside Dashboard/Performance/Query Audit — Kevin's framing:
+it's a distinct destination for "learn everything that's happening," not one more tab
+among the detail pages. Pure navigation change, no query changes.
 
-**Dispatch logic** (Superblocks-side — no new query needed for this part):
-- Segment or Team selected → `ai_summary_facts.sql` (all parts) for the headline, plus (Team
-  only) `debrief_facts_team.sql` for individual drivers.
-- MSP selected → `ai_summary_facts_msp.sql`.
-- Deal Type / Unit Type pass straight through as the `{{ DealType.value }}` / (new) unit-type
-  filter params these queries already accept — no new plumbing.
+**RESTRUCTURED INTO TWO TIERS (2026-08-04)** — Kevin, on the first shipped version (a flat
+list blending a company headline with 5 individual rep bullets): "think like you're a
+leader or the CEO. what do you care about more? if one rep closed a deal? no, you care
+about where the whole business is going." Macro leads, always; individual drivers are a
+separate, secondary section, never interleaved.
 
-**New file `debrief_facts_team.sql`** — the one real gap: per-rep unit trend + win rate +
-streak/personal-best facts, pre-filtered to one team, so the LLM narrates from one coherent
-fact set instead of stitching 3 separate query outputs together itself. Deliberately does
-NOT compute a team-level total (that's `ai_summary_facts.sql`'s job already) — don't let the
-Debrief prompt receive two different "team total" numbers to reconcile.
+**Tier 1 — Macro Trends (always the top section, regardless of which lens/filter is
+active):**
+- Overall unit trend, **New vs. Recaptured split** — `ai_summary_facts.sql` Part A. Fixed
+  2026-08-04: Part A used to filter to new-integrated units only, so the headline total
+  silently excluded recaptured units entirely (~24% of real volume, confirmed live) — Part
+  A now returns the true total plus `new_units_this/last` and `recaptured_units_this/last`
+  broken out explicitly.
+- **New Logo vs. Expansion mix trend** — Part E (`current_expansion_share`,
+  `current_direction`, `streak_length_months` — already handles the "1-month blip vs. real
+  pattern" distinction, no change needed).
+- **MSP trend/concentration** — `ai_summary_facts_msp.sql` — always part of the macro
+  picture, not gated behind selecting the MSP lens specifically (MSP mix is a "shape of the
+  business" fact, same tier as unit/mix trends, not a micro one).
+- Period-maturity check (`days_elapsed`/`days_total_in_period`, §4.5 priority 0) still
+  applies here first, before any of the above gets narrated as a trend.
 
-**Same discipline as the main AI Summary applies here too**: no named deal/account-level
-risk callouts, quantified-only forward-looking flags, never let a data-hygiene artifact read
-as a business signal, and — same non-negotiable rule as Shout Outs — never a Debrief bullet
-that implies one teammate underperformed relative to another.
+**Tier 2 — Individual Drivers (separate, secondary, visually de-emphasized — e.g. a
+collapsed/expandable card below Macro Trends, NEVER inline bullets mixed into it):**
+- Top-3 rep drivers within the current filter — `ai_summary_facts.sql` Part B — used only
+  as *breadth context* for the macro headline ("concentrated in 2 reps" / "broad-based"),
+  not as a per-rep bullet list of its own.
+- Full per-rep detail (unit trend + win rate + streak/personal-best) — only when Team is
+  the active lens — `debrief_facts_team.sql` (unchanged; deliberately has no team-level
+  total of its own, so there's never two different "team total" numbers to reconcile).
+- Default state should be collapsed or visually secondary (smaller card, below the fold) —
+  available on demand, never competing with Macro Trends for the same visual weight.
+
+**Dimension selector**: Segment / MSP / Team — mutually exclusive, pick one primary lens;
+this narrows WHICH SLICE the macro facts are computed over (e.g. Team = Rory's Team scopes
+the unit/mix trend to that team), it does not change which tiers appear. **Deal Type**
+(New Logo/Expansion/Move In) and **Unit Type** (new vs. recaptured) are refinement filters
+layered on top — Unit Type only applies to rolled-out-units facts, Deal Type only to
+deal-grain facts. **Time horizon** (This Week/Month/Quarter) is always active.
+
+**Prompt-layer fix, the direct cause of the flat-list bug**: wire Macro Trends and
+Individual Drivers as two visually separate blocks with two separate headers (or two
+separate LLM calls, whichever is cleaner in Superblocks) — never one prompt call that
+dumps every available fact into a single undifferentiated bullet list. Same discipline as
+the main AI Summary applies to both tiers: no named deal/account-level risk callouts,
+quantified-only forward-looking flags, never let a data-hygiene artifact read as a
+business signal, and — same non-negotiable rule as Shout Outs — never a bullet in either
+tier that implies one teammate underperformed relative to another.
 
 ## 4.11. Punchy, accessible AI summaries — style rule for ALL narration (written down 2026-07-31)
 
