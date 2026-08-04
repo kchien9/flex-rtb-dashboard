@@ -57,6 +57,17 @@ base AS (
       {{#DealType.value}} AND HUBSPOT_DEAL_TYPE = '{{DealType.value}}' {{/DealType.value}}
 )
 -- Part A: headline
+--
+-- ELAPSED-PERIOD AWARENESS ADDED 2026-08-04 -- Kevin caught a Superblocks-built "Funnel
+-- Diagnosis" widget (NOT this file, confirmed by exact-number matching against a raw query)
+-- comparing 4 calendar days (Aug 1-4) against the same 4 days last month, then narrating a
+-- still-forming number as "a complete collapse." This file's period was never that specific
+-- bug (BP_MONTH here already only contains whatever's actually happened, it's not
+-- artificially truncated to a calendar slice) -- but it also never told the LLM how much of
+-- the CURRENT BP month has elapsed, so nothing stopped a similar overstatement here either.
+-- `bp_period_start`/`bp_period_end`/`days_elapsed`/`days_total_in_period` give the narration
+-- step real temporal grounding regardless of which BP month is active -- the prompt rule in
+-- docs/superblocks-setup.md §4.5 now requires checking this before calling any move a trend.
 SELECT
     SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), PROPERTY_UNIT_COUNT, 0)) AS this_period_units,
     SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), PROPERTY_UNIT_COUNT, 0)) AS last_period_units,
@@ -64,7 +75,13 @@ SELECT
         SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), PROPERTY_UNIT_COUNT, 0))
         - SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), PROPERTY_UNIT_COUNT, 0)),
         SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), PROPERTY_UNIT_COUNT, 0))
-    ) AS pct_change
+    ) AS pct_change,
+    DATEADD(day, 4, DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))) AS bp_period_start,
+    LEAST(DATEADD(day, 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), CURRENT_DATE()) AS bp_period_end,
+    DATEDIFF(day, DATEADD(day, 4, DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))),
+                  LEAST(DATEADD(day, 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), CURRENT_DATE())) + 1 AS days_elapsed,
+    DATEDIFF(day, DATEADD(day, 4, DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))),
+                  DATEADD(day, 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))) + 1 AS days_total_in_period
 FROM base
 WHERE BP_MONTH IN ((SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS),
                    DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)));
