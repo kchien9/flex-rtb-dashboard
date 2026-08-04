@@ -40,10 +40,25 @@
 -- query -- feeds insights_niro_mix_trend.sql's streak scanner and any Superblocks card that
 -- wants "NIRO as % of total" directly.
 --
--- Same DSMB exclusion (pmc_size, current live PMC total > 750 units), same departed-rep
--- exclusion (deal_owner_status + {{ GraceMonths.value }} grace period), same segment_bucket/
+-- Same DSMB exclusion (pmc_size, current live PMC total > 750 units), same segment_bucket/
 -- team_bucket mapping, and same apostrophe-escaping caveat on team names as
 -- rolled_out_units_cube.sql -- see that file's header for the full writeup, not repeated here.
+--
+-- DEPARTED-REP EXCLUSION -- DELIBERATELY NOT APPLIED HERE, UNLIKE rolled_out_units_cube.sql.
+-- Caught live before shipping: that filter (drop rows whose HUBSPOT_DEAL_OWNER is a departed
+-- rep beyond the grace window) is designed for FLOW/attribution correctness ("does this
+-- period's number make someone who left look like an active producer") -- rolled_out_units_
+-- cube.sql's own header calls its effect "immaterial" there, citing one legacy pod's 189
+-- units. That assumption does NOT hold for this file's STOCK columns: measured live on MM/Ent
+-- alone, the same filter would drop 460,172 integrated_total_units and 42,108 niro_units
+-- (14-18% of that segment's real current stock) -- properties that are still genuinely
+-- integrated/engaged today, just originally closed by someone no longer at Flex. A property's
+-- current network status doesn't depend on who sold it years ago, so applying a rep-
+-- attribution filter to a stock total is wrong, not conservative -- it would silently delete a
+-- material slice of real network inventory from every segment/team rollup. Tradeoff accepted:
+-- the REP dimension slice ({{ Dimension.value }} = HUBSPOT_DEAL_OWNER) can show a departed
+-- rep's name against real legacy-attributed stock -- that's useful information (an account
+-- needing reassignment), not noise, given the numbers involved.
 --
 -- GRANULARITY built in from the start (unlike the first 7 scanners, which got it bolted on
 -- later) -- {{ Granularity.value }} = 'Month' | 'Quarter', same DATE_TRUNC('quarter', BP_MONTH)
@@ -61,12 +76,7 @@
 -- it. Month grain is unaffected by this bug (period already equals BP_MONTH 1:1) -- confirmed
 -- unchanged before and after this fix.
 
-WITH deal_owner_status AS (
-    SELECT FULL_NAME, IS_ACTIVE, LAST_LOGIN_AT_UTC
-    FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY FULL_NAME ORDER BY IS_ACTIVE DESC, LAST_LOGIN_AT_UTC DESC) = 1
-),
-pmc_size AS (
+WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
     WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
@@ -109,13 +119,11 @@ monthly_stock AS (
         SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0))                      AS integrated_total_units
     FROM base s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
-    LEFT JOIN deal_owner_status u ON u.FULL_NAME = s.HUBSPOT_DEAL_OWNER
     -- LookbackMonths needs a Superblocks component default (e.g. 6) -- see rolled_out_units_cube.sql.
     -- Resolved from MAX(BP_MONTH), not CURRENT_DATE() -- same reasoning as every other file here.
     WHERE s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1), (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
       AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
       AND s.segment_bucket IS NOT NULL
-      AND (u.FULL_NAME IS NULL OR u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
       {{#Team.value}}     AND s.team_bucket = '{{Team.value}}'                       {{/Team.value}}
       {{#Msp.value}}       AND s.acct_pms = '{{Msp.value}}'                          {{/Msp.value}}
       {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE = '{{DealType.value}}'            {{/DealType.value}}
