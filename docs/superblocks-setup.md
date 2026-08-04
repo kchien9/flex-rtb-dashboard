@@ -297,8 +297,9 @@ dashboard's standard filter surface; this is mostly an integration + prompt task
 new data build.
 
 **PLACEMENT (changed 2026-08-04)**: Debrief moves OFF the top tab bar (Deals & Units /
-Pipeline / Activities / Segment × MSP / Trends & Insights / Watch List) and becomes its
-own **left-sidebar entry**, alongside Dashboard/Performance/Query Audit — Kevin's framing:
+Pipeline / Activities / MSP / NIRO / Trends & Insights / Watch List — "Segment × MSP" renamed
+to "MSP" 2026-08-04, see §4.14) and becomes its own **left-sidebar entry**, alongside
+Dashboard/Performance/Query Audit — Kevin's framing:
 it's a distinct destination for "learn everything that's happening," not one more tab
 among the detail pages. Pure navigation change, no query changes.
 
@@ -473,9 +474,10 @@ row might want to call that out bc integrated units are more valuable to us." He
 value hierarchy to frame every callout going forward — captured here once so future narration
 work references it instead of re-deriving it.
 
-**New top-tab-bar page "NIRO"**, placed next to the existing "Segment × MSP" tab (same tier as
-Rolled-Out Units — a drill-able detail page, not a left-nav narrative destination like
-Debrief). Fed by `queries/niro_units_cube.sql`: same `{{ Dimension.value }}` slice pattern,
+**New top-tab-bar page "NIRO"**, placed next to the "MSP" tab (renamed from "Segment × MSP"
+2026-08-04, see §4.14 — same tier as Rolled-Out Units, a drill-able detail page, not a
+left-nav narrative destination like Debrief). Fed by `queries/niro_units_cube.sql`: same
+`{{ Dimension.value }}` slice pattern,
 DSMB exclusion, and segment/team bucket mapping as `rolled_out_units_cube.sql`, plus a
 Month/Quarter `{{ Granularity.value }}` toggle built in from the start.
 
@@ -552,6 +554,43 @@ re-deriving it:
    volume dominance is still a real, important fact on its own axis (this dashboard already
    treats SMB as materially important throughout), it's just not the same axis as
    per-account value.
+
+## 4.14. MSP tab: rename + trend additions (written down 2026-08-04)
+
+Kevin, on the "Segment × MSP" tab's `New Integrated Units — Segment × MSP × Month` table
+(screenshot review): wanted trend visible without cluttering an already-wide table, an
+all-MSP composition chart at the top, a narrower default time window, and the tab renamed.
+Four changes, all UI/wiring — no new queries, no SQL changes.
+
+**1. Tab renamed "Segment × MSP" → "MSP"** on the top tab bar. Pure rename, same page/query
+underneath.
+
+**2. Default trailing window: 6 months, not 12.** Applies to the existing
+`New Integrated Units — Segment × MSP × Month` table's `LookbackMonths` default. Most of what
+Sham acts on is recent; older months should be a scroll/expand action, not the default view.
+
+**3. Pinned trend badge column**, placed immediately after the Segment/MSP label column (NOT
+at the far right after all month columns — that table already needs horizontal scroll, so a
+badge placed at the end would require scrolling to see the exact thing it's meant to surface
+at a glance). One badge per row (segment subtotal rows too): a small arrow + trailing-3-month
+or MoM % change (▲12% / ▼8% / –). Color lives ONLY on this badge (green/red/gray) — do NOT
+tint the raw data cells. The table already uses color for segment identity (Strategic=blue,
+MM/Ent=orange); reusing color for trend direction on the same cells would create two competing
+meanings on the same visual channel. Keeping status color confined to one small badge avoids
+that collision entirely.
+
+**4. New "All MSPs" absolute stacked bar chart**, placed above the existing table on the same
+tab. Company-wide (Team/Segment filters cleared), same trailing-6-month window, same
+underlying data as the table below it (`rolled_out_units_cube.sql`, `{{ Dimension.value }}` =
+`PMS`) — no new query. Top 5-6 MSPs by volume get their own color; everything else folds into
+one "Other" bucket, same 2%-share materiality floor already validated in
+`insights_mix_shift_scanner.sql`. **Fixed color-to-MSP mapping, not sorted by rank** — if an
+MSP's rank changes month to month, its color must not change, or the same hue means a
+different MSP depending on which month you're looking at. This same MSP palette should be
+reused across every MSP-colored chart in the dashboard (this tab, NIRO tab, Debrief) so a
+color always means the same MSP everywhere, not just within one chart. Absolute stacked (not
+100%-normalized) — Kevin's explicit call: segment proportions within each bar already read as
+share visually without losing the total-volume signal a normalized chart would hide.
 
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
