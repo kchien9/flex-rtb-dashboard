@@ -23,6 +23,13 @@
 --
 -- Same DSMB exclusion (PMC current live units > 750) and departure-grace-period rep-status
 -- pattern as rep_leaderboard.sql.
+--
+-- DEALS COUNT DROPPED FROM PART B (2026-08-04) -- Kevin: "i like the this month vs last month
+-- units instead of the num of deals" for the rep drill-down specifically. Part B's SELECT no
+-- longer returns `properties` (deal count) -- matches closed_won_by_rep.sql's rep-drill shape
+-- exactly now (period, rep, team, units, nothing else). Part A's per-segment `properties`
+-- column is UNCHANGED -- that feeds the segment headline card's own "N deals" caption, which
+-- wasn't part of this ask.
 
 -- Part A: segment totals
 WITH current_bp AS (
@@ -183,8 +190,7 @@ SELECT
     p.period,
     b.HUBSPOT_DEAL_OWNER              AS rep,
     cr.team,
-    SUM(b.PROPERTY_UNIT_COUNT)         AS units,
-    COUNT(DISTINCT b.PROPERTY_ID)       AS properties
+    SUM(b.PROPERTY_UNIT_COUNT)         AS units
 FROM bp_periods p
 JOIN base b ON b.ROLLOUT_DATE BETWEEN p.start_date AND p.end_date
 LEFT JOIN pmc_size pm ON b.PMC_ID = pm.PMC_ID
