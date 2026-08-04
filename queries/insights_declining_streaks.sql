@@ -37,6 +37,18 @@
 -- DSMB EXCLUDED (Part A, standard pmc_size join) -- Part B (deal-grain MSP pipeline) has no
 -- account-size concept the same way (see new_opportunities_by_msp.sql's own reasoning),
 -- excluded via the standard legacy-HubSpot-record filter instead.
+--
+-- GRANULARITY ADDED 2026-08-04 -- Kevin: "if sham wants to see mom or qoq we can have all
+-- these queries adjust." `{{ Granularity.value }}` = 'Month' | 'Quarter'. Since BP_MONTH is
+-- already stored as a calendar-month-labeled date, `DATE_TRUNC('quarter', BP_MONTH)` directly
+-- gives the correct BP-QUARTER grouping key with no extra logic (Jan/Feb/Mar BP all truncate
+-- to the same quarter start) -- the streak technique underneath is completely unchanged, only
+-- the bucketing key (renamed `period`, was `BP_MONTH`) switches. Lookback widened to 24 months
+-- (was 12) so Quarter grain still has ~8 periods of real history to stream a streak against,
+-- not just 4. Week granularity is NOT offered here -- PROPERTY_BP_MONTH_STATS has no week-
+-- grain rollup for these flags (insights_daily_pace_scanner.sql already covers week-over-week
+-- pace on the same underlying data at day grain, kept as its own file rather than duplicating
+-- that logic here under a third granularity option).
 
 -- Part A: team decline streak, rolled-out units, all 4 AE pods scanned at once.
 WITH pmc_size AS (
@@ -55,31 +67,31 @@ monthly AS (
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
             ELSE NULL
         END AS team_bucket,
-        s.BP_MONTH,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
         SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -24, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING team_bucket IS NOT NULL AND units >= {{ MinUnitsFloor.value }}
 ),
 with_change AS (
-    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY team_bucket ORDER BY BP_MONTH)) AS chg_sign
+    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY team_bucket ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (PARTITION BY team_bucket ORDER BY BP_MONTH) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY team_bucket ORDER BY period) AS prev_sign
     FROM with_change
     WHERE chg_sign IS NOT NULL
 ),
 with_group AS (
     SELECT *,
-        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY team_bucket ORDER BY BP_MONTH) AS grp
+        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY team_bucket ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT team_bucket, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MIN(units) AS latest_units
+    SELECT team_bucket, chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MIN(units) AS latest_units
     FROM with_group
     GROUP BY team_bucket, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY team_bucket)
@@ -106,11 +118,14 @@ ORDER BY declining_streak_months DESC;
 WITH monthly AS (
     SELECT
         COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set') AS msp,
-        IFF(DAY(o.CREATED_AT_UTC) <= 4, DATE_TRUNC('month', o.CREATED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CREATED_AT_UTC))) AS mo,
+        IFF('{{ Granularity.value }}' = 'Quarter',
+            DATE_TRUNC('quarter', IFF(DAY(o.CREATED_AT_UTC) <= 4, DATE_TRUNC('month', o.CREATED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CREATED_AT_UTC)))),
+            IFF(DAY(o.CREATED_AT_UTC) <= 4, DATE_TRUNC('month', o.CREATED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CREATED_AT_UTC)))
+        ) AS mo,
         COUNT(*) AS pipeline_created_deals
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     WHERE o.OPPORTUNITY_ID LIKE '006%'
-      AND o.CREATED_AT_UTC >= DATEADD(month, -12, IFF(DAY(CURRENT_DATE()) <= 4, DATE_TRUNC('month', CURRENT_DATE()), DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))))
+      AND o.CREATED_AT_UTC >= DATEADD(month, -24, IFF(DAY(CURRENT_DATE()) <= 4, DATE_TRUNC('month', CURRENT_DATE()), DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))))
     GROUP BY 1, 2
     HAVING pipeline_created_deals >= {{ MinDealsFloor.value }}
 ),
@@ -160,31 +175,31 @@ monthly AS (
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
             ELSE NULL
         END AS segment_bucket,
-        s.BP_MONTH,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
         SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -24, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING segment_bucket IS NOT NULL AND units >= {{ MinUnitsFloor.value }}
 ),
 with_change AS (
-    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH)) AS chg_sign
+    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY segment_bucket ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY period) AS prev_sign
     FROM with_change
     WHERE chg_sign IS NOT NULL
 ),
 with_group AS (
     SELECT *,
-        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS grp
+        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MIN(units) AS latest_units
+    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MIN(units) AS latest_units
     FROM with_group
     GROUP BY segment_bucket, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY segment_bucket)
@@ -215,31 +230,31 @@ WITH pmc_size AS (
 monthly AS (
     SELECT
         COALESCE(s.PMS, 'Not Set') AS msp,
-        s.BP_MONTH,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
         SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -24, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING units >= 1000
 ),
 with_change AS (
-    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY msp ORDER BY BP_MONTH)) AS chg_sign
+    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY msp ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (PARTITION BY msp ORDER BY BP_MONTH) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY msp ORDER BY period) AS prev_sign
     FROM with_change
     WHERE chg_sign IS NOT NULL
 ),
 with_group AS (
     SELECT *,
-        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY msp ORDER BY BP_MONTH) AS grp
+        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY msp ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT msp, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MIN(units) AS latest_units
+    SELECT msp, chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MIN(units) AS latest_units
     FROM with_group
     GROUP BY msp, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY msp)
