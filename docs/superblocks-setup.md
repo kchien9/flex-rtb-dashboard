@@ -463,6 +463,96 @@ decline-streak flag added to `debrief_facts_team.sql` (which already carries
 `leader_streak_months`/`is_personal_best` per rep, just not a decline-streak flag yet). None
 of these are difficult given the pattern above — deferred purely for sequencing.
 
+## 4.13. NIRO tab + Strategic Value Hierarchy (written down 2026-08-04)
+
+Kevin, building on the Macro Trends scanner layer: "maybe we should include a NIRO tab too.
+this is non integrated units. this should have similar charts like which teams, reps,
+segments etc, across which MSPs. and trend analysis too. then maybe an integrated vs non
+integrated mix trend call out — if non-integrated units is a bigger share a few months in a
+row might want to call that out bc integrated units are more valuable to us." He also gave a
+value hierarchy to frame every callout going forward — captured here once so future narration
+work references it instead of re-deriving it.
+
+**New top-tab-bar page "NIRO"**, placed next to the existing "Segment × MSP" tab (same tier as
+Rolled-Out Units — a drill-able detail page, not a left-nav narrative destination like
+Debrief). Fed by `queries/niro_units_cube.sql`: same `{{ Dimension.value }}` slice pattern,
+DSMB exclusion, and segment/team bucket mapping as `rolled_out_units_cube.sql`, plus a
+Month/Quarter `{{ Granularity.value }}` toggle built in from the start.
+
+**MSP dimension is different from every other file in this repo — read before reusing the
+pattern elsewhere.** `PMS` (the field every other MSP-sliced query uses) is populated ONLY on
+already-integrated properties — confirmed live, every non-integrated row has `PMS = NULL`.
+Fixed via `DIM_SALES_ACCOUNTS.ACCOUNT_PROPERTY_MANAGEMENT_SOFTWARES` (account-level, confirmed
+1:1 join, no fan-out), the same field the comp engine's `pull_niro_units` already uses.
+
+**AppFolio is deliberately NOT carved out of NIRO here.** The comp engine's `pull_niro_units`
+excludes AppFolio-PMS accounts from NIRO entirely (treats AppFolio embed as "payment-
+integrated, Yes Adjusted" for comp purposes). Asked Kevin directly whether this dashboard
+should match that or show the raw number — he chose raw: AppFolio shows up as the single
+largest NIRO MSP by a wide margin (~140K units, 2x+ the next biggest), and that's exactly the
+kind of gap worth surfacing to Sham, not hiding. This dashboard's NIRO totals will disagree
+with the comp engine's `team_niro_units` by roughly that amount — expected, not a bug.
+
+**Two real bugs caught live before shipping, both instructive beyond this file:**
+- **Stock-vs-flow at Quarter grain**: `niro_units` and `integrated_total_units` are both
+  per-BP_MONTH snapshots (same class as `IS_INTEGRATED_TOTAL` elsewhere in this repo). A naive
+  GROUP BY on the Quarter-truncated period summed 3 months of the same stock value into one
+  bucket, inflating every Quarter number ~3x (MM/Ent showed 348K-612K/quarter vs.
+  126K-188K/month — the tell-tale triple-count). Fixed with the same two-stage pattern
+  `insights_net_units_bridge.sql` already uses: aggregate to real BP_MONTH grain first, THEN
+  roll up to the requested period via `MAX_BY(value, BP_MONTH)`.
+- **Departed-rep exclusion applied to a stock column is wrong, not conservative.**
+  `rolled_out_units_cube.sql`'s departed-rep filter (drop rows whose `HUBSPOT_DEAL_OWNER` is
+  inactive beyond a grace window) exists for FLOW/attribution correctness and its own header
+  calls the effect "immaterial" (189 units, one legacy pod). That assumption breaks for STOCK
+  totals: measured live on MM/Ent alone, the same filter would have dropped 460,172 integrated
+  units and 42,108 NIRO units (14-18% of that segment's real current stock) — properties that
+  are still genuinely integrated/engaged today, just originally closed by someone no longer at
+  Flex. A property's current network status doesn't depend on who sold it years ago. Removed
+  the filter from `niro_units_cube.sql`'s stock columns entirely — worth checking whether
+  `rolled_out_units_cube.sql`'s own `integrated_total_units` column has the same latent issue
+  (not yet checked, flagged here as a follow-up, not fixed in this pass since it wasn't part
+  of what Kevin asked for and changing an existing shipped headline number needs its own
+  sign-off).
+
+**`queries/insights_niro_mix_trend.sql`** — same partitioned gaps-and-islands streak
+technique as the other 8 scanners, applied to NIRO's share of (integrated + NIRO) total, by
+segment (Part A) and team (Part B). Direction matters here, unlike the neutral
+`insights_mix_shift_scanner.sql`: only a RISING NIRO share is flagged (integrated units are
+the more valuable side of this mix — see the hierarchy below), same "direction matters" logic
+as `insights_net_units_bridge.sql`'s churn-rising streak. Validated live: MM/Ent has a real
+7-month rising NIRO-share streak (now 6.53%), House Accounts a 3-month streak (3.47%) —
+confirmed stable at both the default 10,000-unit floor and a much lower 1,000-unit floor
+(identical result set), and ties out exactly to `niro_units_cube.sql`'s independently-computed
+share for the same segment/period.
+
+**Strategic Value Hierarchy — narration guidance, not new hard thresholds beyond the mix-trend
+scanner above.** Four axes Kevin gave, with his own supporting rationale, so any future
+narration work (Debrief, AI Summary, the NIRO callout itself) references this instead of
+re-deriving it:
+
+1. **Integrated > NIRO.** Enforced by `insights_niro_mix_trend.sql` above — a sustained rising
+   NIRO share is the one flag worth surfacing on this axis.
+2. **New Logo / new units > Recaptured / Expansion.** Narration framing only — the data
+   already exists via `ai_summary_facts.sql`'s new/recaptured split (§4.10); no new query.
+3. **RealPage / Yardi / Entrata (strategic DI-footprint priority) > AppFolio (lower comp/NAR
+   value) > other MSPs.** Kevin's rationale: most AppFolio volume comes in Embed-only (not
+   full DI+marketing), and AppFolio's own NAR in that channel runs materially lower than the
+   DI+marketing tier Yardi/RealPage/Entrata typically sit in — Flex's NAR modeling uses
+   AppFolio's ~4% DI penetration as the empirical anchor for the lowest "Embed Only" curve
+   (~4.5% NAR by M12) vs. ~8% for DI+Marketing; live AppFolio Embed NAR ran 3.18%→4.51% over
+   Jan-Jun 2026. AppFolio is also excluded from the Q3 2026 per-unit spiffs that DO apply to
+   RealPage/Yardi/Entrata — a direct, current comp-policy signal pointing the same direction.
+   Colors how `insights_mix_shift_scanner.sql` Part A's MSP-share callouts and the new
+   NIRO-by-MSP breakdown should read: a rising Yardi NIRO gap reads as more urgent than a
+   rising AppFolio one, and AppFolio dominating the NIRO-by-MSP breakdown is an expected,
+   lower-priority fact, not the day's headline.
+4. **Strategic segment (higher $/account) > MM/Ent > SMB per-account, while SMB remains the
+   largest by volume.** Both framings stated together, neither replacing the other — SMB's
+   volume dominance is still a real, important fact on its own axis (this dashboard already
+   treats SMB as materially important throughout), it's just not the same axis as
+   per-account value.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
