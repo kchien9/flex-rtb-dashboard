@@ -26,6 +26,14 @@
 -- "something needs attention" scan. A rising streak is good news, which is already Shout
 -- Outs' / the Macro Trends headline's job to celebrate -- this file doesn't duplicate that.
 --
+-- BUG CAUGHT VALIDATING LIVE (all 4 parts) -- `latest_units`/`latest_deals` originally used
+-- MAX(units)/MAX(pipeline_created_deals) within the streak group, which grabs the STARTING
+-- (highest) value of a decline, not the current one -- Entrata's real Part D row showed
+-- latest_units=37,199 (April, the start of its 5-month decline) when the actual current
+-- month's value is 23,438 (August). Fixed to MIN(...) instead: since every returned row is
+-- declining by construction (`WHERE chg_sign = -1`), the latest month's value is always the
+-- SMALLEST in a monotonically-declining streak, not the largest.
+--
 -- DSMB EXCLUDED (Part A, standard pmc_size join) -- Part B (deal-grain MSP pipeline) has no
 -- account-size concept the same way (see new_opportunities_by_msp.sql's own reasoning),
 -- excluded via the standard legacy-HubSpot-record filter instead.
@@ -71,7 +79,7 @@ with_group AS (
     FROM with_lag
 ),
 streaks AS (
-    SELECT team_bucket, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MAX(units) AS latest_units
+    SELECT team_bucket, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MIN(units) AS latest_units
     FROM with_group
     GROUP BY team_bucket, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY team_bucket)
@@ -121,12 +129,122 @@ with_group AS (
     FROM with_lag
 ),
 streaks AS (
-    SELECT msp, chg_sign, COUNT(*) AS streak_len, MAX(mo) AS latest_month, MAX(pipeline_created_deals) AS latest_deals
+    SELECT msp, chg_sign, COUNT(*) AS streak_len, MAX(mo) AS latest_month, MIN(pipeline_created_deals) AS latest_deals
     FROM with_group
     GROUP BY msp, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY msp)
 )
 SELECT msp, streak_len AS declining_streak_months, latest_month, latest_deals
+FROM streaks
+WHERE chg_sign = -1 AND streak_len >= {{ MinStreakMonths.value }}
+ORDER BY declining_streak_months DESC;
+
+-- Part C: segment decline streak, rolled-out units -- same technique as Part A, but
+-- PARTITION BY segment_bucket (Strategic/MM-Ent/SMB/House Accounts) instead of team_bucket.
+-- Genuinely different cut, not redundant with Part A -- SMB is 1 segment but 2 teams
+-- (Sebastian's + Rory's), so a segment-level SMB decline could be real even if neither
+-- individual SMB team crosses Part A's own streak threshold on its own.
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+monthly AS (
+    SELECT
+        CASE
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
+            ELSE NULL
+        END AS segment_bucket,
+        s.BP_MONTH,
+        SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    GROUP BY 1, 2
+    HAVING segment_bucket IS NOT NULL AND units >= {{ MinUnitsFloor.value }}
+),
+with_change AS (
+    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH)) AS chg_sign
+    FROM monthly
+),
+with_lag AS (
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS prev_sign
+    FROM with_change
+    WHERE chg_sign IS NOT NULL
+),
+with_group AS (
+    SELECT *,
+        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS grp
+    FROM with_lag
+),
+streaks AS (
+    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MIN(units) AS latest_units
+    FROM with_group
+    GROUP BY segment_bucket, grp, chg_sign
+    QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY segment_bucket)
+)
+SELECT segment_bucket, streak_len AS declining_streak_months, latest_month, latest_units
+FROM streaks
+WHERE chg_sign = -1 AND streak_len >= {{ MinStreakMonths.value }}
+ORDER BY declining_streak_months DESC;
+
+-- Part D: MSP decline streak, rolled-out UNITS (Part B was pipeline-created deal COUNT -- the
+-- top-of-funnel side; this is the delivered-volume side). Validated live 2026-08-04: Entrata
+-- shows a real, current 5-month decline on this metric (51,129 -> 37,199 -> 36,947 -> 31,353
+-- -> 23,448 -> 23,438) -- the exact "Entrata pipeline is drying up" pattern Kevin described,
+-- just discovered on the units side rather than the deal-count side.
+--
+-- MATERIALITY FLOOR LOWER THAN TEAM/SEGMENT (1000, not 10000) -- validated live: individual
+-- MSPs are naturally smaller slices than a whole team/segment, and several MSPs are
+-- permanently near-zero (Buildium, ManageAmerica, AppRent -- real but negligible volume) --
+-- 1000 excludes those without excluding any MSP with real, current relevance (Entrata's own
+-- smallest recent month was still 23,438).
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+monthly AS (
+    SELECT
+        COALESCE(s.PMS, 'Not Set') AS msp,
+        s.BP_MONTH,
+        SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    GROUP BY 1, 2
+    HAVING units >= 1000
+),
+with_change AS (
+    SELECT *, SIGN(units - LAG(units) OVER (PARTITION BY msp ORDER BY BP_MONTH)) AS chg_sign
+    FROM monthly
+),
+with_lag AS (
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY msp ORDER BY BP_MONTH) AS prev_sign
+    FROM with_change
+    WHERE chg_sign IS NOT NULL
+),
+with_group AS (
+    SELECT *,
+        SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY msp ORDER BY BP_MONTH) AS grp
+    FROM with_lag
+),
+streaks AS (
+    SELECT msp, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MIN(units) AS latest_units
+    FROM with_group
+    GROUP BY msp, grp, chg_sign
+    QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY msp)
+)
+SELECT msp, streak_len AS declining_streak_months, latest_month, latest_units
 FROM streaks
 WHERE chg_sign = -1 AND streak_len >= {{ MinStreakMonths.value }}
 ORDER BY declining_streak_months DESC;
