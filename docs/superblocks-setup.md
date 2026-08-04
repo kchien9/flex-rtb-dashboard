@@ -114,8 +114,45 @@ the AE managers' job (who report to Sham). He's more big picture since he overse
 sales org."** Every decision below follows from this. This is a summary FOR the person who
 oversees Brandon/Rory/Sebastian/Dana, not a summary for one of them.
 
+**EVERYTHING HERE IS BP-MONTH (AND BP-QUARTER WHERE QUARTERS APPLY), NEVER CALENDAR** — Kevin
+asked directly (2026-08-04) whether the AI summary layer is BP-aware; answer, checked file by
+file: `ai_summary_facts.sql`, `mtr_bullets.sql`, `performance_cube.sql`,
+`activities_by_segment.sql`, `pipeline_by_stage.sql`, `closed_lost_analysis.sql` (and every
+other file with a `current_bp`/`bp_month_label` CTE) all compute "this month" as the 5th of the
+prior calendar month through the 4th of this one, and "this quarter" (where a Quarter toggle
+exists) the same way over 3 consecutive BP months — never a raw calendar month/quarter. This is
+a real, load-bearing distinction: on 2026-08-04 the current BP month (Jul 5–Aug 4) is fully
+elapsed (confirmed live: 31 of 31 days), while the current CALENDAR month (Aug 1–4) is only 4
+days old with 2 of those a weekend — a query built on calendar boundaries would show a tiny,
+noisy partial slice on the exact same day one of these BP-based files shows a complete, mature
+period. If a widget's numbers don't match what these files would produce, it isn't running one
+of them — see the "Funnel Diagnosis" incident below.
+
+**PERIOD-ELAPSED AWARENESS, REQUIRED IN THE PROMPT (added 2026-08-04)** — being BP-aware in the
+SQL isn't sufficient on its own; the LLM narration step must also be told explicitly how mature
+the period is, or it can still overstate a real-but-still-forming number. `ai_summary_facts.sql`
+Part A now returns `bp_period_start`, `bp_period_end`, `days_elapsed`, `days_total_in_period` —
+the system prompt MUST check `days_elapsed` vs. `days_total_in_period` before calling anything a
+trend, a collapse, or a drop, and if the period is meaningfully incomplete, say so explicitly
+("N days into this BP month") rather than comparing it 1:1 against a fully-elapsed prior period
+as if they were equally mature.
+
+**INCIDENT: "Funnel Diagnosis" widget (caught by Kevin, 2026-08-04)** — a widget by this name
+showed a multi-metric "traces back to" causal chain (Closed Won ← Pipeline Created ← AE
+Meetings ← SDR Calls) narrating a "complete collapse." Confirmed by exact number matching
+against a raw query: it was comparing calendar Aug 1–4 against calendar Jul 1–4 (a 4-day MTD-
+vs-MTD pair, 2 of those days a weekend) — NOT any BP-month boundary, and NOT any file in this
+repo. It also reintroduced the exact causal-chain framing `full_funnel_by_segment.sql` was
+deprecated for (see §4.1/that file's header — Kevin: "remove the whole table bc we cannot show
+this causal chain at all"). **Do not rewire or fix this widget in place — replace it with
+`ai_summary_facts.sql` Part D** (funnel lag, already BP-aware, already forbids the causal-chain
+framing per this section) or remove it. If a similarly-named widget reappears, verify its exact
+bound query against Superblocks before trusting its numbers — this is the same "Superblocks
+isn't running our validated query" pattern that has recurred repeatedly throughout this build.
+
 **Facts available** (`ai_summary_facts.sql`, same filter surface as the page it sits on):
-- Part A — headline this-vs-last, whatever's currently filtered.
+- Part A — headline this-vs-last, whatever's currently filtered, plus `days_elapsed`/
+  `days_total_in_period` (see above).
 - Part B — top 3 rep drivers within that filter, with % of total (is the move broad-based or
   1-2 people carrying it).
 - Part C — biggest single deal this period + its share of the scope total (is a big number one
@@ -130,6 +167,10 @@ oversees Brandon/Rory/Sebastian/Dana, not a summary for one of them.
   "facts" this summary narrates from in detail — see below.
 
 **Priority order for the narration (top of the summary to bottom):**
+0. **Check period maturity before saying anything else.** If `days_elapsed` is meaningfully
+   less than `days_total_in_period`, the headline number is a partial read — state that plainly
+   ("N days into this BP month") instead of narrating it as a finished comparison. This check
+   comes before picking an explanatory fact; a still-forming number doesn't need one yet.
 1. **The headline direction + the ONE explanatory fact that actually explains it.** Pick
    whichever of Part B (concentration), Part E (mix shift), or Part F (activity leading
    indicator) best explains Part A's move — don't stack all three if only one is actually the
