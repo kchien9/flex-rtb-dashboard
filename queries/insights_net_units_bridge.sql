@@ -29,8 +29,23 @@
 --
 -- Same DSMB exclusion (pmc_size, current live PMC total > 750) as every other file in this
 -- repo.
+--
+-- GRANULARITY ADDED 2026-08-04 -- `{{ Granularity.value }}` = 'Month' | 'Quarter', same
+-- DATE_TRUNC('quarter', BP_MONTH) technique as insights_declining_streaks.sql. `integrated_total`
+-- for a quarter bucket takes the LAST month's stock value in that quarter, never summed across
+-- months -- summing a STOCK column across 3 months would triple-count it, the exact stock-vs-
+-- flow bug this repo has been burned by before. All the FLOW components (new_integrated,
+-- deactivated, recaptured, etc.) sum correctly across the 3 months in a quarter.
+--
+-- BUG CAUGHT VALIDATING LIVE -- first draft used `MAX_BY(IFF(IS_INTEGRATED_TOTAL,
+-- PROPERTY_UNIT_COUNT, 0), BP_MONTH)` directly inside the `bridge` CTE's single aggregation --
+-- that picks ONE raw detail row's PROPERTY_UNIT_COUNT (whichever row happens to have the max
+-- BP_MONTH), not the real SUMMED monthly stock total -- produced nonsense integrated_total
+-- values of 0-100 instead of ~9-10M. Fixed with a two-stage aggregation: `monthly_stock` first
+-- aggregates IS_INTEGRATED_TOTAL to real per-BP_MONTH totals, THEN `bridge` picks the LAST
+-- month's already-correct total within each period via MAX_BY on that pre-aggregated value.
 
--- Part A: company-wide bridge, trended, {{ LookbackMonths.value }} months (default 8).
+-- Part A: company-wide bridge, trended, {{ LookbackMonths.value }} periods (default 8).
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
@@ -38,9 +53,18 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
+monthly_stock AS (
+    SELECT s.BP_MONTH, SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS integrated_total
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1) - 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    GROUP BY 1
+),
 bridge AS (
-    SELECT s.BP_MONTH,
-        SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS integrated_total,
+    SELECT
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
+        MAX_BY(ms.integrated_total, s.BP_MONTH) AS integrated_total,
         SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)) AS new_integrated,
         -SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0)) AS deactivated,
         SUM(IFF(s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS recaptured,
@@ -48,24 +72,25 @@ bridge AS (
         -SUM(IFF(s.IS_DOWNLEVEL_TO_NON_INTEGRATED_ROLLED_OUT, s.PROPERTY_UNIT_COUNT, 0)) AS downlevel_to_niro
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    JOIN monthly_stock ms ON s.BP_MONTH = ms.BP_MONTH
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} - 1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1) - 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1
 )
 SELECT
-    BP_MONTH,
+    period,
     integrated_total,
-    integrated_total - LAG(integrated_total) OVER (ORDER BY BP_MONTH) AS net_change,
+    integrated_total - LAG(integrated_total) OVER (ORDER BY period) AS net_change,
     new_integrated,
     deactivated,
     recaptured,
     uplevel_to_integrated,
     downlevel_to_niro,
-    (integrated_total - LAG(integrated_total) OVER (ORDER BY BP_MONTH))
+    (integrated_total - LAG(integrated_total) OVER (ORDER BY period))
         - (new_integrated + deactivated + recaptured + uplevel_to_integrated + downlevel_to_niro) AS remaining_net_change
 FROM bridge
-QUALIFY BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-ORDER BY BP_MONTH;
+QUALIFY period >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1), (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+ORDER BY period;
 
 -- Part B: same bridge, by SEGMENT, all 4 segments scanned/returned at once (not filtered to
 -- one at a time) -- lets the Debrief macro tier show "which segment is driving churn" without
@@ -77,41 +102,56 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-bridge AS (
-    SELECT
+scoped AS (
+    SELECT s.*,
         CASE
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'MM/Ent'
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
             ELSE NULL
-        END AS segment_bucket,
-        s.BP_MONTH,
-        SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS integrated_total,
+        END AS segment_bucket
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    WHERE s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1) - 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+),
+monthly_stock AS (
+    SELECT s.segment_bucket, s.BP_MONTH,
+        SUM(IFF(s.IS_INTEGRATED_TOTAL, s.PROPERTY_UNIT_COUNT, 0)) AS integrated_total
+    FROM scoped s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+    GROUP BY 1, 2
+    HAVING segment_bucket IS NOT NULL
+),
+bridge AS (
+    SELECT
+        s.segment_bucket,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
+        MAX_BY(ms.integrated_total, s.BP_MONTH) AS integrated_total,
         SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)) AS new_integrated,
         -SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0)) AS deactivated,
         SUM(IFF(s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS recaptured,
         SUM(IFF(s.IS_UPLEVEL_TO_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)) AS uplevel_to_integrated,
         -SUM(IFF(s.IS_DOWNLEVEL_TO_NON_INTEGRATED_ROLLED_OUT, s.PROPERTY_UNIT_COUNT, 0)) AS downlevel_to_niro
-    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    FROM scoped s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    JOIN monthly_stock ms ON s.BP_MONTH = ms.BP_MONTH AND s.segment_bucket = ms.segment_bucket
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} - 1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.segment_bucket IS NOT NULL
     GROUP BY 1, 2
-    HAVING segment_bucket IS NOT NULL
 )
 SELECT
     segment_bucket,
-    BP_MONTH,
-    integrated_total - LAG(integrated_total) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS net_change,
+    period,
+    integrated_total - LAG(integrated_total) OVER (PARTITION BY segment_bucket ORDER BY period) AS net_change,
     new_integrated,
     deactivated,
     recaptured,
     uplevel_to_integrated,
     downlevel_to_niro
 FROM bridge
-QUALIFY BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
-ORDER BY segment_bucket, BP_MONTH;
+QUALIFY period >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1), (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+ORDER BY segment_bucket, period;
 
 -- Part C: churn-acceleration streak scanner -- is DEACTIVATED magnitude growing for N
 -- consecutive months, by segment, all segments scanned at once. Same gaps-and-islands
@@ -134,29 +174,29 @@ monthly AS (
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
             ELSE NULL
         END AS segment_bucket,
-        s.BP_MONTH,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
         SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0)) AS deactivated_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -24, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING segment_bucket IS NOT NULL AND deactivated_units >= {{ MinUnitsFloor.value }}
 ),
 with_change AS (
-    SELECT *, SIGN(deactivated_units - LAG(deactivated_units) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH)) AS chg_sign
+    SELECT *, SIGN(deactivated_units - LAG(deactivated_units) OVER (PARTITION BY segment_bucket ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY period) AS prev_sign
     FROM with_change WHERE chg_sign IS NOT NULL AND chg_sign != 0
 ),
 with_group AS (
-    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY BP_MONTH) AS grp
+    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MAX_BY(deactivated_units, BP_MONTH) AS latest_deactivated_units
+    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MAX_BY(deactivated_units, period) AS latest_deactivated_units
     FROM with_group
     GROUP BY segment_bucket, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY segment_bucket)
@@ -190,19 +230,19 @@ monthly AS (
             WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
             ELSE NULL
         END AS segment_bucket,
-        s.BP_MONTH,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
         SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0)) AS deactivated_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -IFF('{{ Granularity.value }}' = 'Quarter', 6, 1), (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING segment_bucket IS NOT NULL
 ),
 this_last AS (
     SELECT segment_bucket,
-        MAX(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), deactivated_units, NULL)) AS deactivated_this,
-        MAX(IFF(BP_MONTH < (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), deactivated_units, NULL)) AS deactivated_last
+        MAX_BY(deactivated_units, period) AS deactivated_this,
+        MAX_BY(IFF(period < (SELECT MAX(period) FROM monthly), deactivated_units, NULL), IFF(period < (SELECT MAX(period) FROM monthly), period, NULL)) AS deactivated_last
     FROM monthly
     GROUP BY segment_bucket
 )
