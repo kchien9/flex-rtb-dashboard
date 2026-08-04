@@ -365,6 +365,104 @@ this dashboard: the main AI Summary (§4.5), MTR Bullets (`mtr_bullets.sql`), Sh
   never seen this dashboard should be able to follow every line without a glossary.
 - **Short, declarative sentences.** Cut qualifiers that don't change the decision.
 
+## 4.12. Proactive Insight Scanners — Macro Trends fast-follow layer (written down 2026-08-04)
+
+Kevin, on the first shipped Debrief tab: "this is super basic compared to what this could
+be... I want to see trends for all major MSPs (mix too), segments, teams, new logo vs
+expansion, new vs recaptured, closed won vs closed lost, total rolled out units, time trends
+(MoM, QoQ), and rep-level trends. I want more than just 'total units went up 10%, x rep
+contributed y.'" Then, walking blind spots: net units reconciliation, account concentration,
+sales cycle time trend, and deal size trend.
+
+**The core technique, reused across every file below**: generalize the single-series
+gaps-and-islands streak detector already used in `ai_summary_facts.sql` Part E
+(`SIGN(value - LAG(value))` → break-group via running sum of sign changes → `COUNT` within
+the latest group) by adding a `PARTITION BY <dimension>` — this scans every team/segment/MSP
+at once instead of one pre-filtered slice, the same "scan everything, flag threshold-crossers"
+principle `insights_trend_flags.sql` already uses, just combined with a multi-month streak
+requirement for the first time.
+
+**7 new files, all in `queries/`, all DSMB-excluded via the standard `pmc_size` join
+(current live PMC total > 750 units):**
+
+| File | What it scans | Materiality floor |
+|---|---|---|
+| `insights_declining_streaks.sql` | Team (A) / MSP pipeline deal count (B) / segment (C) / MSP rolled-out units (D) decline streaks | 10,000 units (team/segment), 1,000 units (MSP), 10 deals (MSP pipeline) |
+| `insights_mix_shift_scanner.sql` | MSP share-of-total (A), New Logo vs. Expansion share by team (B) / segment (B-Segment), New vs. Recaptured share by team (C) / segment (C-Segment) | 2% latest share (MSP), streak-on-direction not fixed threshold (mix parts — see below) |
+| `insights_daily_pace_scanner.sql` | Team (A) / segment (B) / MSP (C) daily rollout pace, trailing-7-days vs. prior-7-days | `MinDailyAvgFloor` / `MinPctDropThreshold` (validated ~59% drop threshold) |
+| `insights_net_units_bridge.sql` | Company-wide (A) / segment (B) net units bridge, deactivation-rising streak (C), single-month deactivation spike (D) | segment bridge only; 15% single-month spike (D) |
+| `insights_account_concentration.sql` | Top-5 PMC combined share of new+recaptured units, trended (A) + rising-concentration streak (B) | top-5 combined, not top-1 (largest single PMC is 9.6% of 413 contributing) |
+| `insights_cycle_time_trend.sql` | Touch-to-close median days by segment (New Logo only), trend (A) + lengthening/shortening streak (B) | `MinDealsFloor` (validate against real monthly deal counts) |
+| `insights_deal_size_trend.sql` | Avg + median deal size by segment, trend (A) + streak (B) | `MinDealsFloor`; **median is the primary trended metric**, not average — distribution is heavily right-skewed by whale deals |
+
+**Why streak-on-direction instead of a fixed skew threshold (mix-shift, deal-size, cycle-time
+files)**: checked live — MM/Ent and Strategic structurally run 60–100% Expansion share most
+months (larger, established accounts), so a fixed ">65% = too skewed" band would permanently
+false-alarm on them. Both directions surface instead (a mix shift isn't inherently good or
+bad on its own — a sustained *move* is the signal), same reasoning applied to deal size
+(shrinking isn't inherently bad, growing isn't inherently good) and cycle time (lengthening is
+bad news, shortening is good news, but both are worth surfacing).
+
+**Why week-over-week trailing windows, not single-day-vs-average, for daily pace**: rollout
+data has a strong weekend rhythm (near-zero Saturdays/Sundays) — checked live, a naive
+"today vs. 7-day average" false-flags every weekend. Fixed by comparing two like-for-like
+7-day windows (trailing 7 days vs. the 7 days before that), which cancels the rhythm out.
+
+**Why net units bridge matches Kevin's own reconciliation, not a re-derivation**: `Net Change
+= New Integrated + Recaptured + Uplevel to Integrated − Deactivated − Downlevel to NIRO +
+Remaining Net Change` (the residual/unexplained bucket) — this is the exact formula from an
+existing Sigma "Integrated Units [Full Month]" table, not something invented here. Cross-
+validated against `IS_INTEGRATED_TOTAL`'s own month-over-month change; reconciles within
+1–4% every month (small residual attributed to this dashboard's DSMB exclusion, which the
+Sigma source table likely lacks).
+
+**The "activities dropped → expect a % pipeline decrease" idea was checked and rejected as a
+quantified claim**: company-wide AE activity (calls + meetings) vs. next-month pipeline
+created, 12 full months, same-month r=0.31, 1-month-lag r=0.26 — too weak and inconsistent to
+support a quantified number. If this ever gets built, it must be a directional flag only
+(activity meaningfully up/down, materiality-floored), never a "% decrease" figure — matches
+this repo's standing finding on activity correlations elsewhere (SDR calls, AE meetings).
+
+**Calendar-vs-BP-month bucketing bug, caught 3 more times building this layer** (on top of
+every prior occurrence documented elsewhere in this doc): `insights_declining_streaks.sql`
+Part B, `insights_cycle_time_trend.sql`, and `insights_deal_size_trend.sql` all first drafted
+with `DATE_TRUNC('month', <date column>)` (calendar), which mislabels the last few days of a
+BP month as belonging to the next one — fixed to the standard
+`IFF(DAY(<col>) <= 4, DATE_TRUNC('month', <col>), DATE_TRUNC('month', DATEADD(month, 1,
+<col>)))` formula in all three. **Note**: `insights_cycle_time_trend.sql`'s fix was
+documented as already done in an earlier pass but had never actually been committed — the
+file still had the calendar bug until the 2026-08-04 Granularity toggle pass caught and fixed
+it live. If a query built off `CLOSED_AT_UTC`/`CREATED_AT_UTC` ever looks off by a
+suspiciously round amount at a month boundary, check this first.
+
+**Month/Quarter granularity toggle** — Kevin: "adding time granularity will be helpful, so if
+Sham wants to see MoM or QoQ we can have all these queries adjust." Every file above except
+`insights_daily_pace_scanner.sql` (inherently week-grain by design) takes a
+`{{ Granularity.value }}` = `'Month'` | `'Quarter'` Superblocks parameter, using
+`IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', bp_month), bp_month) AS
+period` — this works because BP_MONTH is stored as a calendar-month-labeled date (e.g. "Jul
+BP" = 2026-07-01, real dates Jun 5–Jul 4), so truncating to quarter directly groups the right
+3 BP-month labels with zero extra logic (confirmed live: Jul/Aug/Sep BP all truncate to
+2026-07-01 = BP Q3, matching Kevin's own description). Streak-scanner lookbacks were widened
+from 12 to 24 months (fixed) so Quarter grain still has enough periods for a real streak;
+trend-view lookbacks scale by `{{ LookbackMonths.value }} * IFF(Quarter, 3, 1)`.
+
+**Wiring into Debrief (§4.10) Tier 1 — Macro Trends**: these scanners are the proactive layer
+behind the always-on macro section — a scanner firing a flag (a real streak, a spike, a
+concentration move) is what makes a bullet like "SMB team's rolled-out units have declined 3
+straight months" or "Entrata's pipeline is drying up, 5 months running" appear, instead of
+only ever reporting "units went up/down X% this month." Same non-negotiable narration rules
+apply as the rest of Debrief: no named deal/account-level risk callouts, no bullet implying
+one teammate underperformed another, and the activity-correlation rule above (directional
+only, never quantified) must be respected if that scanner is ever built.
+
+**Stage 2 — explicitly deferred, not forgotten**: generalizing
+`insights_closed_lost_trend.sql` into a multi-entity scanner; an SDR activity decline streak
+(`PARTITION BY sdr_segment` on `sdr_activity_to_pipeline.sql`'s `sdr_calls`); and a rep-level
+decline-streak flag added to `debrief_facts_team.sql` (which already carries
+`leader_streak_months`/`is_personal_best` per rep, just not a decline-streak flag yet). None
+of these are difficult given the pattern above — deferred purely for sequencing.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
