@@ -27,6 +27,9 @@
 -- convention everywhere else -- median deal SIZE isn't mechanically biased by a partial period
 -- the way a SUM/COUNT would be, but bucketing consistently avoids ever mislabeling a
 -- still-forming BP month as complete in the narration layer.
+--
+-- GRANULARITY ADDED 2026-08-04 -- `{{ Granularity.value }}` = 'Month' | 'Quarter', same
+-- DATE_TRUNC('quarter', bp_month) technique as the other scanners.
 
 -- Part A: trended avg + median deal size, by segment.
 WITH pmc_size AS (
@@ -36,7 +39,7 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-monthly AS (
+with_bp_month AS (
     SELECT
         CASE
             WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
@@ -44,23 +47,30 @@ monthly AS (
             WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
             ELSE NULL
         END AS segment_bucket,
-        IFF(DAY(o.CLOSED_AT_UTC) <= 4, DATE_TRUNC('month', o.CLOSED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CLOSED_AT_UTC))) AS mo,
-        AVG(o.FLEX_UNIT_COUNT) AS avg_deal_size,
-        MEDIAN(o.FLEX_UNIT_COUNT) AS median_deal_size,
-        COUNT(*) AS deals
+        IFF(DAY(o.CLOSED_AT_UTC) <= 4, DATE_TRUNC('month', o.CLOSED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CLOSED_AT_UTC))) AS bp_month,
+        o.FLEX_UNIT_COUNT
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
       AND o.FLEX_UNIT_COUNT IS NOT NULL
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
-      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }} - 1, CURRENT_DATE())
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1) - 1, CURRENT_DATE())
+),
+monthly AS (
+    SELECT
+        segment_bucket,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', bp_month), bp_month) AS period,
+        AVG(FLEX_UNIT_COUNT) AS avg_deal_size,
+        MEDIAN(FLEX_UNIT_COUNT) AS median_deal_size,
+        COUNT(*) AS deals
+    FROM with_bp_month
     GROUP BY 1, 2
     HAVING segment_bucket IS NOT NULL AND deals >= {{ MinDealsFloor.value }}
 )
-SELECT segment_bucket, mo, ROUND(avg_deal_size, 0) AS avg_deal_size, median_deal_size, deals
+SELECT segment_bucket, period, ROUND(avg_deal_size, 0) AS avg_deal_size, median_deal_size, deals
 FROM monthly
-ORDER BY segment_bucket, mo;
+ORDER BY segment_bucket, period;
 
 -- Part B: median deal size streak, all segments scanned at once.
 WITH pmc_size AS (
@@ -70,7 +80,7 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-monthly AS (
+with_bp_month AS (
     SELECT
         CASE
             WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
@@ -78,33 +88,40 @@ monthly AS (
             WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
             ELSE NULL
         END AS segment_bucket,
-        IFF(DAY(o.CLOSED_AT_UTC) <= 4, DATE_TRUNC('month', o.CLOSED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CLOSED_AT_UTC))) AS mo,
-        MEDIAN(o.FLEX_UNIT_COUNT) AS median_deal_size,
-        COUNT(*) AS deals
+        IFF(DAY(o.CLOSED_AT_UTC) <= 4, DATE_TRUNC('month', o.CLOSED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, o.CLOSED_AT_UTC))) AS bp_month,
+        o.FLEX_UNIT_COUNT
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
       AND o.FLEX_UNIT_COUNT IS NOT NULL
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
-      AND o.CLOSED_AT_UTC >= DATEADD(month, -13, CURRENT_DATE())
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -24, CURRENT_DATE())
+),
+monthly AS (
+    SELECT
+        segment_bucket,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', bp_month), bp_month) AS period,
+        MEDIAN(FLEX_UNIT_COUNT) AS median_deal_size,
+        COUNT(*) AS deals
+    FROM with_bp_month
     GROUP BY 1, 2
     HAVING segment_bucket IS NOT NULL AND deals >= {{ MinDealsFloor.value }}
 ),
 with_change AS (
-    SELECT *, SIGN(median_deal_size - LAG(median_deal_size) OVER (PARTITION BY segment_bucket ORDER BY mo)) AS chg_sign
+    SELECT *, SIGN(median_deal_size - LAG(median_deal_size) OVER (PARTITION BY segment_bucket ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY mo) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY period) AS prev_sign
     FROM with_change WHERE chg_sign IS NOT NULL AND chg_sign != 0
 ),
 with_group AS (
-    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY mo) AS grp
+    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(mo) AS latest_month, MAX_BY(median_deal_size, mo) AS latest_median_deal_size
+    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MAX_BY(median_deal_size, period) AS latest_median_deal_size
     FROM with_group
     GROUP BY segment_bucket, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY segment_bucket)
