@@ -50,13 +50,23 @@ base AS (
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.IS_NEW_INTEGRATED
+      AND (s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER)
       {{#Team.value}}     AND team_bucket = '{{Team.value}}'          {{/Team.value}}
       {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
       {{#Msp.value}}      AND PMS = '{{Msp.value}}'                  {{/Msp.value}}
       {{#DealType.value}} AND HUBSPOT_DEAL_TYPE = '{{DealType.value}}' {{/DealType.value}}
 )
 -- Part A: headline
+--
+-- NEW VS. RECAPTURED SPLIT ADDED 2026-08-04 -- `base` used to filter to `s.IS_NEW_INTEGRATED`
+-- only, meaning "this_period_units" was silently NEW units only -- recaptured units never
+-- existed anywhere in this file, despite being a real, shown-elsewhere metric (see
+-- rolled_out_units_daily_trend.sql). Broadened to `(IS_NEW_INTEGRATED OR
+-- IS_RECAPTURED_NEW_ROLLOUT OR IS_RECAPTURED_OTHER)` -- same disjoint-flags pattern already
+-- validated there -- so `this_period_units`/`last_period_units` are now the true total, with
+-- `new_units_*`/`recaptured_units_*` broken out alongside for the Debrief tab's macro-trends
+-- section (Kevin: "focus on high level trends first like units, new vs recap..."). Part B's
+-- rep ranking now includes a rep's recaptured credit too -- deliberate, ties to this total.
 --
 -- ELAPSED-PERIOD AWARENESS ADDED 2026-08-04 -- Kevin caught a Superblocks-built "Funnel
 -- Diagnosis" widget (NOT this file, confirmed by exact-number matching against a raw query)
@@ -76,6 +86,10 @@ SELECT
         - SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), PROPERTY_UNIT_COUNT, 0)),
         SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), PROPERTY_UNIT_COUNT, 0))
     ) AS pct_change,
+    SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS) AND IS_NEW_INTEGRATED, PROPERTY_UNIT_COUNT, 0)) AS new_units_this,
+    SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)) AND IS_NEW_INTEGRATED, PROPERTY_UNIT_COUNT, 0)) AS new_units_last,
+    SUM(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS) AND (IS_RECAPTURED_NEW_ROLLOUT OR IS_RECAPTURED_OTHER), PROPERTY_UNIT_COUNT, 0)) AS recaptured_units_this,
+    SUM(IFF(BP_MONTH = DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)) AND (IS_RECAPTURED_NEW_ROLLOUT OR IS_RECAPTURED_OTHER), PROPERTY_UNIT_COUNT, 0)) AS recaptured_units_last,
     DATEADD(day, 4, DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))) AS bp_period_start,
     LEAST(DATEADD(day, 3, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)), CURRENT_DATE()) AS bp_period_end,
     DATEDIFF(day, DATEADD(day, 4, DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))),
@@ -118,7 +132,7 @@ base AS (
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.IS_NEW_INTEGRATED
+      AND (s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER)
       {{#Team.value}}     AND team_bucket = '{{Team.value}}'          {{/Team.value}}
       {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
       {{#Msp.value}}      AND PMS = '{{Msp.value}}'                  {{/Msp.value}}
