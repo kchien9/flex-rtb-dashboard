@@ -22,6 +22,16 @@
 -- own header already flags this repo's small-sample caveat (some segment/month combos had 1-6
 -- deals) -- `{{ MinDealsFloor.value }}` (validate against real monthly deal counts per segment
 -- before shipping) keeps a 2-deal month's median from counting toward a "trend."
+--
+-- BP MONTH, NOT CALENDAR -- same bug class as insights_declining_streaks.sql Part B and
+-- insights_deal_size_trend.sql: bucketing CLOSED_AT_UTC by calendar month mislabels the last
+-- few days of a BP month as belonging to the next one. Fixed to the standard BP-month IFF
+-- formula.
+--
+-- GRANULARITY ADDED 2026-08-04 -- `{{ Granularity.value }}` = 'Month' | 'Quarter', same
+-- DATE_TRUNC('quarter', bp_month) technique as the other scanners. Lookback widened from 12 to
+-- 24 months (fixed, not scaled by a LookbackMonths param -- this file never had one) so Quarter
+-- grain still has enough periods for a real streak.
 
 WITH emp_dedup AS (
     SELECT EMPLOYEE_SK, EMAIL
@@ -57,25 +67,26 @@ deals AS (
         END AS segment_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE = 'New Logo'
-      AND o.CLOSED_AT_UTC >= DATEADD(month, -12, CURRENT_DATE())
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -24, CURRENT_DATE())
 ),
 with_touch AS (
     SELECT d.OPPORTUNITY_ID, d.segment_bucket, d.CLOSED_AT_UTC,
-        DATE_TRUNC('month', d.CLOSED_AT_UTC) AS mo,
+        IFF(DAY(d.CLOSED_AT_UTC) <= 4, DATE_TRUNC('month', d.CLOSED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, d.CLOSED_AT_UTC))) AS bp_month,
         DATEDIFF(day, fa.first_activity_date, d.CLOSED_AT_UTC) AS days_touch_to_close
     FROM deals d
     LEFT JOIN first_activity_ever fa ON d.CRM_ACCOUNT_SK = fa.CRM_ACCOUNT_SK
     WHERE d.segment_bucket IS NOT NULL AND fa.first_activity_date IS NOT NULL
 ),
 monthly AS (
-    SELECT segment_bucket, mo,
+    SELECT segment_bucket,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', bp_month), bp_month) AS period,
         MEDIAN(days_touch_to_close) AS median_days,
         COUNT(*) AS deals_with_touch
     FROM with_touch
     GROUP BY 1, 2
     HAVING deals_with_touch >= {{ MinDealsFloor.value }}
 )
-SELECT * FROM monthly ORDER BY segment_bucket, mo;
+SELECT * FROM monthly ORDER BY segment_bucket, period;
 
 -- Part B: lengthening/shortening streak, all segments scanned at once -- same gaps-and-islands
 -- technique as insights_declining_streaks.sql, applied to median_days_touch_to_close.
@@ -113,36 +124,38 @@ deals AS (
         END AS segment_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
     WHERE o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE = 'New Logo'
-      AND o.CLOSED_AT_UTC >= DATEADD(month, -12, CURRENT_DATE())
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -24, CURRENT_DATE())
 ),
 with_touch AS (
     SELECT d.OPPORTUNITY_ID, d.segment_bucket, d.CLOSED_AT_UTC,
-        DATE_TRUNC('month', d.CLOSED_AT_UTC) AS mo,
+        IFF(DAY(d.CLOSED_AT_UTC) <= 4, DATE_TRUNC('month', d.CLOSED_AT_UTC), DATE_TRUNC('month', DATEADD(month, 1, d.CLOSED_AT_UTC))) AS bp_month,
         DATEDIFF(day, fa.first_activity_date, d.CLOSED_AT_UTC) AS days_touch_to_close
     FROM deals d
     LEFT JOIN first_activity_ever fa ON d.CRM_ACCOUNT_SK = fa.CRM_ACCOUNT_SK
     WHERE d.segment_bucket IS NOT NULL AND fa.first_activity_date IS NOT NULL
 ),
 monthly AS (
-    SELECT segment_bucket, mo, MEDIAN(days_touch_to_close) AS median_days, COUNT(*) AS deals_with_touch
+    SELECT segment_bucket,
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', bp_month), bp_month) AS period,
+        MEDIAN(days_touch_to_close) AS median_days, COUNT(*) AS deals_with_touch
     FROM with_touch
     GROUP BY 1, 2
     HAVING deals_with_touch >= {{ MinDealsFloor.value }}
 ),
 with_change AS (
-    SELECT *, SIGN(median_days - LAG(median_days) OVER (PARTITION BY segment_bucket ORDER BY mo)) AS chg_sign
+    SELECT *, SIGN(median_days - LAG(median_days) OVER (PARTITION BY segment_bucket ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY mo) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (PARTITION BY segment_bucket ORDER BY period) AS prev_sign
     FROM with_change WHERE chg_sign IS NOT NULL AND chg_sign != 0
 ),
 with_group AS (
-    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY mo) AS grp
+    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (PARTITION BY segment_bucket ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(mo) AS latest_month, MAX_BY(median_days, mo) AS latest_median_days
+    SELECT segment_bucket, chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MAX_BY(median_days, period) AS latest_median_days
     FROM with_group
     GROUP BY segment_bucket, grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER (PARTITION BY segment_bucket)
