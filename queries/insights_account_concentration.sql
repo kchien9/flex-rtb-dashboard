@@ -21,6 +21,13 @@
 -- Same DSMB exclusion (pmc_size, current live PMC total > 750) as every other file in this
 -- repo. Company-wide by default; segment cut in Part A/B-Segment for "is this a Strategic-
 -- specific whale-account risk or company-wide."
+--
+-- GRANULARITY ADDED 2026-08-04 -- `{{ Granularity.value }}` = 'Month' | 'Quarter', same
+-- DATE_TRUNC('quarter', BP_MONTH) technique as insights_declining_streaks.sql. For Quarter
+-- grain, each PMC's units are SUMMED across its 3 months first, THEN the top-5 are picked
+-- within that quarter total -- not re-picking a top-5 per month and combining, which would let
+-- a PMC that was #1 in one month but absent from the other two overstate its real quarterly
+-- share.
 
 -- Part A: top-5 PMC combined share of total new+recaptured units, trended, company-wide.
 WITH pmc_size AS (
@@ -31,22 +38,24 @@ WITH pmc_size AS (
     GROUP BY 1
 ),
 pmc_units AS (
-    SELECT s.BP_MONTH, s.PMC_ID, ANY_VALUE(s.PMC_NAME) AS pmc_name,
+    SELECT
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
+        s.PMC_ID, ANY_VALUE(s.PMC_NAME) AS pmc_name,
         SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1) - 2, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING units > 0
 ),
 ranked AS (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY BP_MONTH ORDER BY units DESC) AS rnk,
-        SUM(units) OVER (PARTITION BY BP_MONTH) AS month_total
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY period ORDER BY units DESC) AS rnk,
+        SUM(units) OVER (PARTITION BY period) AS month_total
     FROM pmc_units
 )
 SELECT
-    BP_MONTH,
+    period,
     SUM(units) AS top5_units,
     MAX(month_total) AS month_total,
     DIV0(SUM(units), MAX(month_total)) AS top5_share,
@@ -66,39 +75,41 @@ WITH pmc_size AS (
     GROUP BY 1
 ),
 pmc_units AS (
-    SELECT s.BP_MONTH, s.PMC_ID,
+    SELECT
+        IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', s.BP_MONTH), s.BP_MONTH) AS period,
+        s.PMC_ID,
         SUM(IFF(s.IS_NEW_INTEGRATED OR s.IS_RECAPTURED_NEW_ROLLOUT OR s.IS_RECAPTURED_OTHER, s.PROPERTY_UNIT_COUNT, 0)) AS units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
     LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
     WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
-      AND s.BP_MONTH >= DATEADD(month, -12, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+      AND s.BP_MONTH >= DATEADD(month, -24, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
     GROUP BY 1, 2
     HAVING units > 0
 ),
 ranked AS (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY BP_MONTH ORDER BY units DESC) AS rnk,
-        SUM(units) OVER (PARTITION BY BP_MONTH) AS month_total
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY period ORDER BY units DESC) AS rnk,
+        SUM(units) OVER (PARTITION BY period) AS month_total
     FROM pmc_units
 ),
 monthly AS (
-    SELECT BP_MONTH, DIV0(SUM(units), MAX(month_total)) AS top5_share
+    SELECT period, DIV0(SUM(units), MAX(month_total)) AS top5_share
     FROM ranked WHERE rnk <= 5
     GROUP BY 1
 ),
 with_change AS (
-    SELECT *, SIGN(top5_share - LAG(top5_share) OVER (ORDER BY BP_MONTH)) AS chg_sign
+    SELECT *, SIGN(top5_share - LAG(top5_share) OVER (ORDER BY period)) AS chg_sign
     FROM monthly
 ),
 with_lag AS (
-    SELECT *, LAG(chg_sign) OVER (ORDER BY BP_MONTH) AS prev_sign
+    SELECT *, LAG(chg_sign) OVER (ORDER BY period) AS prev_sign
     FROM with_change WHERE chg_sign IS NOT NULL AND chg_sign != 0
 ),
 with_group AS (
-    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (ORDER BY BP_MONTH) AS grp
+    SELECT *, SUM(IFF(chg_sign != prev_sign OR prev_sign IS NULL, 1, 0)) OVER (ORDER BY period) AS grp
     FROM with_lag
 ),
 streaks AS (
-    SELECT chg_sign, COUNT(*) AS streak_len, MAX(BP_MONTH) AS latest_month, MAX_BY(top5_share, BP_MONTH) AS latest_top5_share
+    SELECT chg_sign, COUNT(*) AS streak_len, MAX(period) AS latest_month, MAX_BY(top5_share, period) AS latest_top5_share
     FROM with_group
     GROUP BY grp, chg_sign
     QUALIFY latest_month = MAX(latest_month) OVER ()
