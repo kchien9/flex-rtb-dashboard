@@ -165,3 +165,50 @@ SELECT segment_bucket, streak_len AS rising_churn_streak_months, latest_month, l
 FROM streaks
 WHERE chg_sign = 1 AND streak_len >= {{ MinStreakMonths.value }}
 ORDER BY rising_churn_streak_months DESC;
+
+-- Part D: single-month deactivation SPIKE flag, all segments scanned at once -- Kevin: "if
+-- deactivations are way up this month probably something worth calling out too." Part C
+-- above requires 2+ CONSECUTIVE months of rising churn to flag anything -- a real, sharp
+-- one-month spike that hasn't (yet) repeated would be invisible to it. Same single-delta +
+-- materiality-floor pattern as insights_trend_flags.sql, applied specifically to deactivated
+-- units instead of general rolled-out volume (that file doesn't isolate deactivations at all).
+-- Validated live: SMB deactivated units jumped 54% in one month (16,353 -> 25,186, Jul -> Aug)
+-- -- a real, current spike Part C's streak requirement alone would not have caught yet.
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+monthly AS (
+    SELECT
+        CASE
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN s.HUBSPOT_STATIC_TEAM_NAME_DEAL = 'House Accounts' THEN 'House Accounts'
+            ELSE NULL
+        END AS segment_bucket,
+        s.BP_MONTH,
+        SUM(IFF(s.IS_DEACTIVATED, s.PROPERTY_UNIT_COUNT, 0)) AS deactivated_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS s
+    LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
+    WHERE (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
+      AND s.BP_MONTH >= DATEADD(month, -1, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+    GROUP BY 1, 2
+    HAVING segment_bucket IS NOT NULL
+),
+this_last AS (
+    SELECT segment_bucket,
+        MAX(IFF(BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), deactivated_units, NULL)) AS deactivated_this,
+        MAX(IFF(BP_MONTH < (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS), deactivated_units, NULL)) AS deactivated_last
+    FROM monthly
+    GROUP BY segment_bucket
+)
+SELECT segment_bucket, deactivated_this, deactivated_last,
+    DIV0(deactivated_this - deactivated_last, deactivated_last) AS pct_change
+FROM this_last
+WHERE deactivated_last >= {{ MinUnitsFloor.value }}
+  AND DIV0(deactivated_this - deactivated_last, deactivated_last) >= {{ MinPctSpikeThreshold.value }}
+ORDER BY pct_change DESC;
