@@ -32,6 +32,27 @@
 -- repo-wide DSMB audit completed 2026-07-31 (see README's "must-fix items" #3).
 --
 -- Same dedup + departure-grace-period pattern as everywhere else in this repo.
+--
+-- PARTIAL CURRENT MONTH FLAGGED, NOT HIDDEN -- added 2026-08-04, same bug class as the
+-- "Funnel Diagnosis" widget issue Kevin caught (a still-forming period read as if it were
+-- complete). This file's `months` CTE includes the current calendar month, which on any day
+-- before month-end only has a few days of real activity in it -- checked live: the August 2026
+-- bucket showed sdr_calls an order of magnitude below every other month (115 vs. ~2,000-2,600
+-- for MM/Ent) purely because only 4 days had elapsed, not because SDR activity actually
+-- collapsed. `is_partial_month` flags this explicitly so a trend chart/LLM narration doesn't
+-- read the current month's dip as real without that context -- don't drop the row (Sham may
+-- still want to see today's running total), just don't let it get compared 1:1 against a full
+-- prior month without the caveat visible.
+--
+-- SAME-MONTH, NOT LAGGED -- checked live 2026-08-04 (11 full months, current partial month
+-- excluded): SDR calls correlate with New Logo pipeline created in the SAME month (MM/Ent
+-- r=0.63, SMB r=0.17, Strategic r=-0.45 -- Strategic unreliable regardless, 1-person sample).
+-- A 1-month-LAGGED correlation (this month's calls vs. NEXT month's pipeline) is weaker or
+-- negative in all three segments -- the data does not support a delayed relationship the way
+-- sales_cycle_time_by_segment.sql's touch-to-close lag does. This makes sense: an SDR's
+-- qualifying call is often the same event that gets an opportunity created in Salesforce, not
+-- a lead-time input to one weeks later. Kept as a same-period side-by-side trend, not a lagged
+-- view -- don't add a lag shift without new evidence contradicting this.
 
 WITH months AS (
     SELECT DATEADD(month, -SEQ4(), DATE_TRUNC('month', CURRENT_DATE())) AS mo
@@ -109,7 +130,8 @@ SELECT
     sp.segment,
     COALESCE(sc.sdr_calls, 0)                 AS sdr_calls,
     COALESCE(sc.sdr_headcount, 0)              AS sdr_headcount,
-    COALESCE(pc.new_logo_pipeline_created, 0) AS new_logo_pipeline_created
+    COALESCE(pc.new_logo_pipeline_created, 0) AS new_logo_pipeline_created,
+    IFF(sp.mo = DATE_TRUNC('month', CURRENT_DATE()), TRUE, FALSE) AS is_partial_month
 FROM spine sp
 LEFT JOIN sdr_calls sc ON sp.mo = sc.mo AND sp.segment = sc.segment
 LEFT JOIN pipeline_created pc ON sp.mo = pc.mo AND sp.segment = pc.segment
