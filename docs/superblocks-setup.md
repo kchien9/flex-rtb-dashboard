@@ -572,12 +572,39 @@ Sham acts on is recent; older months should be a scroll/expand action, not the d
 **3. Pinned trend badge column**, placed immediately after the Segment/MSP label column (NOT
 at the far right after all month columns — that table already needs horizontal scroll, so a
 badge placed at the end would require scrolling to see the exact thing it's meant to surface
-at a glance). One badge per row (segment subtotal rows too): a small arrow + trailing-3-month
-or MoM % change (▲12% / ▼8% / –). Color lives ONLY on this badge (green/red/gray) — do NOT
-tint the raw data cells. The table already uses color for segment identity (Strategic=blue,
-MM/Ent=orange); reusing color for trend direction on the same cells would create two competing
-meanings on the same visual channel. Keeping status color confined to one small badge avoids
-that collision entirely.
+at a glance). One badge per row (segment subtotal rows too). Color lives ONLY on this badge
+(green/red/gray) — do NOT tint the raw data cells. The table already uses color for segment
+identity (Strategic=blue, MM/Ent=orange); reusing color for trend direction on the same cells
+would create two competing meanings on the same visual channel. Keeping status color confined
+to one small badge avoids that collision entirely.
+
+**Badge formula — LOCKED 2026-08-04, plain MoM, not a 3-month rolling average.** First shipped
+as a trailing-3-month-avg-vs-prior-3-month-avg comparison (same like-for-like-window technique
+`insights_daily_pace_scanner.sql` uses); Kevin's live feedback: not intuitive, and the "why 3
+vs 3, why not 2 vs 2" question doesn't have a good answer for a single glance-level badge.
+Reasoning for switching to plain MoM: the badge sits directly next to the two adjacent month
+columns it's comparing, so a reader can verify it by eye against numbers already on screen — a
+multi-month average can't be checked that way without doing the math themselves. The "is this
+a REAL sustained pattern, not noise" job already belongs to the dedicated streak scanners
+(`insights_declining_streaks.sql`, `insights_mix_shift_scanner.sql`), which have their own
+proper materiality floors — this table badge doesn't need to re-solve that, it just needs to
+say what happened last month vs. the month before.
+
+Formula, this month vs. last month, with blank/zero handled explicitly rather than run through
+a division that produces garbage or an undefined result:
+- Prior month blank/0, current month has volume → **"New"** (no meaningful "% increase from
+  zero").
+- Prior month has volume, current month blank/0 → **▼100%** or **"Stopped"** — a real,
+  well-defined event (dropped to nothing), not noise to suppress. Kevin: "if a month is blank
+  that should count as blank. that's a trend worth flagging right?" — yes, this is exactly
+  that case, made explicit instead of hidden.
+- Both months blank/0 → no badge. Nothing happened, nothing to report.
+- Both non-zero → plain `(this_month - last_month) / last_month`.
+
+This directly fixes the ResMan example that surfaced the original 3-month-avg formula's
+noise problem: Jun blank → Jul 422 now reads "New" (previously produced a distorted % off a
+near-empty rolling average); Jul 422 → Aug 1,297 reads as a real, legitimate +207% (two
+genuine non-zero months, no smoothing needed to trust it).
 
 **4. New "All MSPs" absolute stacked bar chart**, placed above the existing table on the same
 tab. Company-wide (Team/Segment filters cleared), same trailing-6-month window, same
