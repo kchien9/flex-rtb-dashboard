@@ -677,6 +677,66 @@ month (deal-closing files, not rollout files) must gate completeness with a pure
 comparison — never reach for the BP-month label just because it's the "is this period done"
 pattern used elsewhere; that pattern is only correct when the grouping grain is ALSO BP-month.
 
+## 4.16. SDR Funnel section on Activities tab (written down 2026-08-05)
+
+Kevin: "how do we improve activities tab? what is the 'magic number' we can create to relate
+activities to output... i kinda want to do a segment waterfall view... meetings booked,
+meetings held, calls/emails, inbound vs outbound, touches per lead, lead response time,
+sourced opportunities (this is just pipeline created)." Brainstormed the structure with him
+before building anything (his own instinct, confirmed correct): a single chart with a
+segment/SDR filter kills comparison — the fix is small multiples (all 3 segments in one result
+set, faceted side by side), not a filter. Extends the existing Activities tab; does not fork a
+new top-level tab.
+
+**Two real feasibility gaps, checked live, both real:**
+- SDR attribution resolves to a real named SDR only ~11% of the time (`SDR_SK` is 100%
+  populated but mostly points to departed reps / cross-system ID mismatches once actually
+  joined) — matches `sdr_activity_to_pipeline.sql`'s own already-documented finding, re-
+  confirmed rather than assumed. **No per-deal SDR attribution anywhere in this build** —
+  segment/pod-level aggregate volume only, and `sdr_activity_by_rep.sql` deliberately has NO
+  `pipeline_created` column at the individual-rep grain for exactly this reason.
+- `LEAD_SOURCE` on `FCT_CRM_OPPORTUNITY` is 100% null. Inbound/outbound is real, just tracked
+  elsewhere — Kevin pointed to `EXTERNAL_DATA.POLYTOMIC.SALESFORCE_EVENT.INBOUND_MEETING__C`,
+  confirmed live: real, populated, joins cleanly to `FCT_CRM_MEETING` via `MEETING_ID = ID`
+  (100% match rate in a 3-month test window, no fan-out).
+
+**Correction to the shared "activity today → pipeline later" assumption** — `sdr_activity_to_
+pipeline.sql` already tested this exact question at segment grain, very recently (2026-08-04):
+SDR calls correlate with New Logo pipeline created in the SAME month (MM/Ent r=0.63, SMB
+r=0.17, Strategic r=-0.45 unreliable/1-person sample); a 1-month LAGGED correlation is weaker
+or negative in all three segments. Likely reason: a qualifying call is often the same event
+that gets an opportunity created, not a lead-time input weeks earlier. `sdr_funnel_by_segment.
+sql` reuses that same-month framing as-is — **do not add a lag shift to this specific leg
+without new evidence contradicting that finding.** This is scoped to calls→pipeline
+specifically; booked→held and first-touch→lead-response are short, mechanical windows (days)
+and never raised the lag question at all.
+
+**Files:**
+- `queries/sdr_funnel_by_segment.sql` — the small-multiples data source. One row per
+  (segment, month): activity volume, meetings booked/held (`FCT_CRM_MEETING.MEETING_STATUS`
+  already has `completed`/`scheduled`/`cancelled`/`no_show` — no second join needed for this
+  part), inbound share of held meetings, pipeline created (New Logo only, same-month framing
+  above). Same-period SNAPSHOT, not a causal chain — caption it as "volume by stage this
+  period," never as this-period-activity-caused-this-period-pipeline. `is_partial_month` flags
+  the still-forming current month explicitly (same bug class as the Funnel Diagnosis incident).
+  Also feeds the **touches composition stacked bar** directly (calls + emails + meetings_held
+  already sum to one real whole) — no separate query needed for that chart.
+- `queries/sdr_lead_response.sql` — touches-per-lead and lead-response-time stat tiles, by
+  segment. No distinct Lead object exists in this warehouse — approximated via the same
+  first-touch technique already validated in `sales_cycle_time_by_segment.sql`/`insights_
+  cycle_time_trend.sql` (`MIN(completed Task/Meeting)` on the account). Median shown alongside
+  average — validated live, real skew (MM/Ent Feb: avg 165 days vs. median 9, one outlier lead
+  dragging the average up).
+- `queries/sdr_activity_by_rep.sql` — the SDR-level drill-through, same metrics as the segment
+  funnel minus `pipeline_created` (see attribution gap above). Gated behind a click-through,
+  not the default view — same macro-first-then-micro placement as the rep leaderboard and
+  Debrief's individual-drivers tier.
+
+**Layout**: small multiples (3 segment funnels side by side) at the top, touches-composition
+stacked bar and inbound/outbound share below, stat tiles (touches/lead, lead-response-time,
+meetings-held-rate) with the sparkline+badge pattern already locked in for the MSP tab
+(§4.14), SDR-level table as a drill-through at the bottom.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
