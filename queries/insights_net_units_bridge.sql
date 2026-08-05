@@ -359,6 +359,14 @@ ORDER BY team_bucket, period;
 -- excluded -- keeps the real "unknown MSP" volume visible instead of vanishing, and keeps this
 -- breakout's total reconcilable against Part B's Segment total (RECONCILED LIVE -- see commit
 -- message).
+--
+-- LARGE "NOT SET" BUCKET ON DEACTIVATIONS -- CONFIRMED LIVE, NOT A BUG. Checked live: ~39% of
+-- deactivated units (38,932 of 98,840 for the period checked) have no resolvable MSP via this
+-- join -- a real, expected data-coverage gap for churned accounts, not a bug (the reconciliation
+-- above still ties out exactly, so this isn't a fan-out or dropped-row problem -- DIM_SALES_
+-- ACCOUNTS simply doesn't reliably carry an MSP value once an account has churned). A large
+-- 'Not Set' bucket on the deactivations cut specifically is normal -- don't mistake it for a
+-- join failure.
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
     FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
