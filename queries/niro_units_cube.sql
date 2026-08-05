@@ -75,6 +75,30 @@
 -- picks the LAST month's already-correct value within the period instead of summing across
 -- it. Month grain is unaffected by this bug (period already equals BP_MONTH 1:1) -- confirmed
 -- unchanged before and after this fix.
+--
+-- MULTI-SELECT, added 2026-08-05 -- same change as rolled_out_units_cube.sql's own header
+-- writeup (same commit series, Debrief restructure): all 5 filters below (Team/Msp/DealType/
+-- Segment/Rep) are now `IN ({{X.value}})`, not `= '{{X.value}}'`. The QUOTES are no longer
+-- supplied by this file -- {{X.value}} must render as an already-quoted, comma-separated list
+-- (e.g. Team.value -> 'Brandon''s Team' for one selection, 'Brandon''s Team','Dana''s Team' for
+-- two), with every embedded apostrophe already doubled, before it reaches this query. A
+-- single-value multi-select is regression-tested to behave identically to the old single-
+-- dropdown `=` filter.
+--
+-- DUAL TIME COMPARISON, added 2026-08-05 (Debrief restructure, docs/superpowers/specs/2026-08-
+-- 05-debrief-restructure-design.md, item 7) -- extends niro_units specifically, the same
+-- metric this file already trend-tracks via niro_units_period_change/niro_units_rolling_avg_
+-- 3period above -- not a new metric, and not applied to integrated_total_units (this file's
+-- other stock column has no pre-existing trend precedent to extend). Added niro_units_prior_
+-- period (the raw LAG value niro_units_period_change already subtracts, but not previously
+-- exposed on its own -- Box 2's Time picker needs the raw comparison value, not just the
+-- delta) and niro_units_trailing_avg_6period (ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING,
+-- EXCLUDING the current row so it serves as an independent baseline rather than double-
+-- counting the row it's being compared against -- same reasoning as rolled_out_units_cube.
+-- sql's new_integrated_units_trailing_avg_6mo). Named "_6period", not "_6mo", because this
+-- file's period column can be Month OR Quarter ({{ Granularity.value }}) -- unlike rolled_out_
+-- units_cube.sql, which is month-only -- matching this file's own existing "_3period" naming
+-- convention rather than borrowing rolled_out's month-specific one.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -124,11 +148,11 @@ monthly_stock AS (
     WHERE s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1), (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
       AND (p.pmc_current_units IS NULL OR p.pmc_current_units > 750)
       AND s.segment_bucket IS NOT NULL
-      {{#Team.value}}     AND s.team_bucket = '{{Team.value}}'                       {{/Team.value}}
-      {{#Msp.value}}       AND s.acct_pms = '{{Msp.value}}'                          {{/Msp.value}}
-      {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE = '{{DealType.value}}'            {{/DealType.value}}
-      {{#Segment.value}}   AND s.segment_bucket = '{{Segment.value}}'                {{/Segment.value}}
-      {{#Rep.value}}        AND s.HUBSPOT_DEAL_OWNER = '{{Rep.value}}'               {{/Rep.value}}
+      {{#Team.value}}     AND s.team_bucket IN ({{Team.value}})                      {{/Team.value}}
+      {{#Msp.value}}       AND s.acct_pms IN ({{Msp.value}})                         {{/Msp.value}}
+      {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE IN ({{DealType.value}})           {{/DealType.value}}
+      {{#Segment.value}}   AND s.segment_bucket IN ({{Segment.value}})               {{/Segment.value}}
+      {{#Rep.value}}        AND s.HUBSPOT_DEAL_OWNER IN ({{Rep.value}})              {{/Rep.value}}
     GROUP BY 1, 2, 3, 4
 ),
 period_stock AS (
@@ -157,6 +181,13 @@ SELECT
     -- it operates on the already period-rolled-up `period_stock`, not raw BP_MONTH rows.
     niro_units - LAG(niro_units) OVER (PARTITION BY segment_bucket, team_bucket, slice ORDER BY period) AS niro_units_period_change,
     AVG(niro_units) OVER (PARTITION BY segment_bucket, team_bucket, slice ORDER BY period
-                          ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)      AS niro_units_rolling_avg_3period
+                          ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)      AS niro_units_rolling_avg_3period,
+    -- Dual time comparison (Debrief restructure, see header) -- extends niro_units, the same
+    -- metric already trend-tracked by the two columns just above. niro_units_prior_period is
+    -- the raw LAG value (niro_units_period_change already computes the delta off this same LAG,
+    -- but never exposed the raw comparison value on its own -- Box 2's Time picker needs both).
+    LAG(niro_units) OVER (PARTITION BY segment_bucket, team_bucket, slice ORDER BY period) AS niro_units_prior_period,
+    AVG(niro_units) OVER (PARTITION BY segment_bucket, team_bucket, slice ORDER BY period
+                          ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)      AS niro_units_trailing_avg_6period
 FROM period_stock
 ORDER BY 1, 2, 3, 4;
