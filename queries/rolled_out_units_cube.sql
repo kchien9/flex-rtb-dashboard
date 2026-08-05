@@ -17,9 +17,13 @@
 -- confirmed live: `... = 'Brandon's Team'` is a SQL syntax error, not a hypothetical.
 -- Prefer Superblocks' native bind-parameter syntax for the Snowflake connector (properly
 -- escaped by the driver) over raw Mustache string substitution for every value filter below.
--- If only Mustache is available, the filter value must have its apostrophes doubled before
--- it reaches this query (e.g. in the component's transform, value.replace("'", "''")) --
--- verified fix: '{{Team.value}}' -> 'Brandon''s Team' resolves and runs correctly.
+-- MULTI-SELECT, added 2026-08-05 -- all 5 filters below are now `IN ({{X.value}})`, not
+-- `= '{{X.value}}'`. The QUOTES are no longer supplied by this file -- {{X.value}} must render
+-- as an already-quoted, comma-separated list (e.g. Team.value -> 'Brandon''s Team' for one
+-- selection, 'Brandon''s Team','Dana''s Team' for two), with every embedded apostrophe already
+-- doubled, before it reaches this query (component transform: value.replace("'", "''")). A
+-- single-value multi-select (one item in the list) is regression-tested to behave identically
+-- to the old single-dropdown `=` filter.
 --
 -- All 5 slice-able dimensions are filterable here so they can be layered together (e.g.
 -- Team + MSP + DealType at once, per Kevin's "provide detail to the lowest level of
@@ -148,7 +152,23 @@ SELECT
     AVG(SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)))
         OVER (PARTITION BY s.segment_bucket, s.team_bucket, COALESCE({{ Dimension.value }}, 'Not Set')
               ORDER BY DATE_TRUNC('month', s.BP_MONTH)
-              ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)               AS new_integrated_units_rolling_avg_3mo
+              ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)               AS new_integrated_units_rolling_avg_3mo,
+    -- Dual time comparison (Debrief restructure, docs/superpowers/specs/2026-08-05-debrief-
+    -- restructure-design.md, item 7) -- Box 2's Time picker needs both a prior-period value and
+    -- a trailing average alongside whatever period Sham is inspecting. Applied to
+    -- new_integrated_units specifically (the same metric this file already trend-tracks via
+    -- new_integrated_units_rolling_avg_3mo just above), not a new metric -- month grain per the
+    -- spec leads with prior-period as primary, trailing average as secondary; unlike the 3mo avg
+    -- above, this trailing average EXCLUDES the current row (6 PRECEDING AND 1 PRECEDING) so it
+    -- can serve as an independent comparison baseline rather than double-counting the row it's
+    -- being compared against.
+    LAG(SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)))
+        OVER (PARTITION BY s.segment_bucket, s.team_bucket, COALESCE({{ Dimension.value }}, 'Not Set')
+              ORDER BY DATE_TRUNC('month', s.BP_MONTH))                AS new_integrated_units_prior_period,
+    AVG(SUM(IFF(s.IS_NEW_INTEGRATED, s.PROPERTY_UNIT_COUNT, 0)))
+        OVER (PARTITION BY s.segment_bucket, s.team_bucket, COALESCE({{ Dimension.value }}, 'Not Set')
+              ORDER BY DATE_TRUNC('month', s.BP_MONTH)
+              ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)               AS new_integrated_units_trailing_avg_6mo
 FROM base s
 LEFT JOIN pmc_size p ON s.PMC_ID = p.PMC_ID
 LEFT JOIN deal_owner_status u ON u.FULL_NAME = s.HUBSPOT_DEAL_OWNER
@@ -166,10 +186,10 @@ WHERE s.BP_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_M
   -- departed-rep exclusion: keep if no user record match (don't punish a join miss), OR
   -- currently active, OR inactive but logged in within the grace window
   AND (u.FULL_NAME IS NULL OR u.IS_ACTIVE OR u.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
-  {{#Team.value}}     AND s.team_bucket = '{{Team.value}}'                       {{/Team.value}}
-  {{#Msp.value}}       AND s.PMS = '{{Msp.value}}'                                {{/Msp.value}}
-  {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE = '{{DealType.value}}'             {{/DealType.value}}
-  {{#Segment.value}}   AND s.segment_bucket = '{{Segment.value}}'                 {{/Segment.value}}
-  {{#Rep.value}}        AND s.HUBSPOT_DEAL_OWNER = '{{Rep.value}}'                {{/Rep.value}}
+  {{#Team.value}}     AND s.team_bucket IN ({{Team.value}})                       {{/Team.value}}
+  {{#Msp.value}}       AND s.PMS IN ({{Msp.value}})                                {{/Msp.value}}
+  {{#DealType.value}}  AND s.HUBSPOT_DEAL_TYPE IN ({{DealType.value}})             {{/DealType.value}}
+  {{#Segment.value}}   AND s.segment_bucket IN ({{Segment.value}})                 {{/Segment.value}}
+  {{#Rep.value}}        AND s.HUBSPOT_DEAL_OWNER IN ({{Rep.value}})                {{/Rep.value}}
 GROUP BY 1, 2, 3, 4
 ORDER BY 1, 2, 3, 4;
