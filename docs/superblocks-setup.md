@@ -256,34 +256,51 @@ Concrete before/after (same underlying fact, different write-up):
 | "Cory Baach hit a personal best this month with 38,158 units rolled out." | "🔥 Cory Baach just posted his best month yet — 38K units rolled out. Let's go!" |
 | "Dana's Team rolled out 128,331 units this month, up 30% from last month." | "📈 Dana's Team is on fire this month — units up 30% MoM. Keep it going!" |
 
-**Team-wide callouts, ADDED 2026-08-05** (`team_shout_outs_facts.sql`, new sibling file to
-`shout_outs_facts.sql` — that file is unchanged, still rep-grain). Kevin: "can we do team wide
-callouts too? like 'the team rolled out 3x more units this month than last!'" Two fact blocks,
-both self-referential (a team/pod vs. its OWN prior period, never vs. another team — same
-framing rule as the rep-level facts):
+**Team-wide callouts, ADDED 2026-08-05, REVISED SAME DAY** (`team_shout_outs_facts.sql`, new
+sibling file to `shout_outs_facts.sql` — that file is unchanged, still rep-grain). Kevin's ask
+evolved over the course of the build: first "can we do team wide callouts too?" (illustrative
+"3x"/"2x" examples, confirmed made up, not real targets), then "call out sdrs on booked
+meetings too actually... each ae team then sdrs on meetings! then team wide metrics like the
+team hit a high on meetings bookings / calls. and the whole org — we rolled out 20% more units
+this month over last." Three fact blocks, all self-referential (an entity vs. its OWN prior
+period or own full history — never vs. another team/pod):
 
-- **Part A — AE team units, MoM** (`fact_type = 'team_units'`): all 4 AE teams, `this_period_
-  value`/`last_period_value`/`ratio`/`pct_change`. **Real numbers as of 2026-08-05, for
-  calibration — Kevin's own "3x" example was illustrative, not real**: Dana's +30%, Brandon's
-  +29%, Rory's +18%, Sebastian's +18%. Tell the LLM to use the ACTUAL `pct_change` value, phrased
-  as "+18%" or "nearly a third more" — never force a "3x" framing that isn't in the data.
-- **Part B — SDR pod activity, MoM** (`fact_type = 'sdr_calls'` / `'sdr_meetings_held'`): SMB /
-  MM/Ent / Strategic pods. **As of 2026-08-05 this is flat-to-down, not a growth story** (calls
-  -4% to -9%, one pod +1%; meetings_held mostly floored out as too small a sample to report).
-  **This is the important part**: if this block returns rows showing a decline or nothing at
-  all, the prompt must NOT invent a "crushed it" line for SDRs that period — either state the
-  real direction plainly ("SDR call volume held steady" / skip entirely if it's a real decline
-  and there's nothing positive to say) or omit the SDR line from that period's message. Do not
-  let the messagey tone above turn into fabricating a win that isn't there — upbeat framing
-  applies to REAL positive facts, it's not license to spin a flat month into a fake one.
-- Both parts have their own materiality floors baked into the SQL (team units ≥2,000 combined
-  units; calls ≥200 last-period; meetings_held ≥10 last-period) — a row only appears here if
-  it already cleared that bar, no additional filtering needed downstream.
+- **Part A — AE team units** (`fact_type = 'team_units'`): all 4 AE teams. MoM ratio/pct_change
+  AND `is_high` (current month vs. every prior month on record, no fixed window — see below).
+  **Real numbers as of 2026-08-05**: all 4 teams up 15–31% MoM, and Sebastian's Team is a
+  genuine `is_high = TRUE` — 47,933 units this month is its highest EVER (prior max 45,914).
+  That's the strongest single line available today — an all-time high beats a plain % every
+  time it's true.
+- **Part B — SDR pod activity** (`fact_type = 'sdr_calls'` / `'sdr_meetings_booked'` /
+  `'sdr_meetings_held'`): SMB / MM/Ent / Strategic pods, per Kevin's explicit ask to cover
+  booked meetings, not just held. **As of 2026-08-05 this is DOWN, not a growth story** — calls
+  flat-to-down (-4% to +1%), meetings_booked down 50–80% across all 3 pods, and no pod is
+  currently `is_high` on either metric. **This is the important part**: if this block shows a
+  decline and no `is_high`, the prompt must NOT invent a "crushed it" line for SDRs that period
+  — either state the real direction plainly or omit the SDR line entirely. Upbeat tone applies
+  to REAL positive facts, not license to spin a flat/down month into a fake win.
+- **Part C — whole org units** (`fact_type = 'org_units'`, single row, `entity = 'Whole Org'`):
+  company-wide total, NOT restricted to reps matched to one of the 4 named AE teams (a
+  team-restricted sum would silently understate the real total). **Real number as of
+  2026-08-05: +20.7% MoM (337,707 vs. 279,690)** — this is the one that actually matches
+  Kevin's own "20% more units" example almost exactly. Also carries `is_high`.
+- **`is_high` uses FULL available history, not a fixed trailing window** — this is the direct
+  fix for the bug just caught in `shout_outs_facts.sql` ("cory's been at the company longer
+  than 6 months" — a fixed window was silently understating what "best" means for a tenured
+  entity). Applied proactively here so team/pod "hit a high" facts don't make the same mistake.
+- Every part/metric has its own materiality floor baked into the SQL (team units ≥2,000
+  combined units; calls ≥200 last-period; meetings_booked/held ≥10 last-period) — a row only
+  appears here if it already cleared that bar, no additional filtering needed downstream.
 
-**Placement**: same combined block as the rep-level shout-outs, team-wide lines can lead
-(company/team-level naturally reads first in a leadership Slack post) with the per-rep lines
-following, or as a clearly separated second paragraph — either works, just don't interleave a
-team line and a rep line into one run-on sentence.
+**Selection guidance for the LLM**: prefer `is_high = TRUE` over a plain MoM % for the same
+entity when both are true — "highest month ever" is a stronger, more specific line than "up
+12%." If an entity is flat or down and not `is_high`, either state the real number plainly or
+skip it for that period's message.
+
+**Placement**: same combined block as the rep-level shout-outs. Suggested order: whole-org line
+first (sets the company-level frame), then AE team lines, then SDR pod line(s), then per-rep
+lines last (most granular) — or as clearly separated paragraphs by grain; either works, just
+don't interleave grains into one run-on sentence.
 
 **Style**: bullets, plain language, no unexplained jargon — see §4.11, applies here too — EXCEPT
 tone, which is the messagey override above, specific to this one block.

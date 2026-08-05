@@ -23,18 +23,25 @@
 --      Validated live: real streaks exist but are usually short (1-2 months) -- don't expect
 --      an "N straight months" story every period, most months the best available fact will be
 --      #2 or #3 below.
---   2. is_personal_best -- this month's rolled-out units are higher than any of their own
---      trailing 5 months. Purely self-referential, zero comparison to teammates -- the safest
---      fact type given the framing rule above. IMPORTANT SCOPE NOTE (clarified 2026-08-05, per
---      Kevin's "are you sure about the personal bests? how do u know"): this is a "best of the
---      trailing 6 months" claim, NOT a literal career-best -- there's no lifetime lookback here.
---      Verified live against 4 real featured reps (Cory Baach, Umar Khan, Caleb Benson, Brianne
---      Santa-Donato): all 4 claims were arithmetically correct (this month was the max of their
---      own 6-month window). One nuance worth knowing, not a bug: a rep can satisfy the
---      `prior_month_count >= 2` guard with EXACTLY 2 prior months (a newer rep who just started
---      ramping) -- their claim is still true, but rests on a thinner comparison base than a rep
---      with a full 6-month history. Don't relabel this as "career best" in narration without
---      building a real lifetime lookback first.
+--   2. is_personal_best -- this month's rolled-out units are higher than EVERY prior month in
+--      the rep's FULL career history at Flex, not a fixed trailing window. Purely
+--      self-referential, zero comparison to teammates -- the safest fact type given the framing
+--      rule above.
+--
+--      BUG CAUGHT LIVE 2026-08-05, per Kevin: "cory's been at the company longer than 6
+--      months" -- an earlier draft capped the lookback at a fixed trailing 6 months
+--      (`personal_best` sourced from the same `monthly` CTE `leader_streak` uses). That silently
+--      turned "personal best" into "best of the last 6 months," which is a materially different
+--      and overstated claim for any tenured rep. Confirmed live: Cory Baach's real career-best
+--      month is 66,604 units (Nov 2022), with several other months over 55K (Feb 2025: 66,468;
+--      Dec 2024: 55,923; Sep 2025: 55,797) -- his August 2026 month (the one the 6-month window
+--      was calling a "personal best") wasn't remotely his real best, just the best of a
+--      short, arbitrary window. Fixed by sourcing `personal_best` from `full_history` below --
+--      no BP_MONTH floor at all, every month the rep has ever had at Flex. `leader_streak`
+--      intentionally still uses the 6-month-windowed `monthly` CTE -- that fact is genuinely
+--      about RECENT consecutive months, a fixed recent window is correct there, this bug was
+--      specific to personal_best silently inheriting a window that only made sense for a
+--      different fact type.
 --   3. new_logo_deals_this_month -- real, simple, positive count, via FCT_CRM_OPPORTUNITY
 --      OWNER_SK (current identity), Closed Won, New Logo only. Validated live: real range is
 --      0-13 deals this month across reps -- meaningfully different between people, a genuine
