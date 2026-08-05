@@ -797,6 +797,46 @@ When Part C returns a row for a target month, that IS the flag (pre-computed `co
 change` and `driver_segment`, so the LLM never does the subtraction itself); when it returns
 no rows, there's nothing to call out for that month.
 
+## 4.18. SDR tables: outbound clarity, MoM trend, lead-response unit bug (written down 2026-08-05)
+
+Kevin, reviewing the SDR Rep Detail table (§4.16): "for chase 40 meetings were held and 14
+were inbound so that means 26 were outbound? can you make that more clear." Confirmed and
+added `meetings_held_outbound` (= held − inbound) explicitly to both `sdr_activity_by_rep.sql`
+and `sdr_funnel_by_segment.sql` — don't make the reader subtract it themselves.
+
+**Lead response time showing "0m, avg 47m"** — diagnosed as a Superblocks unit-label bug, not
+a data bug. `sdr_lead_response.sql` only ever computes `lead_response_time_days` — there's no
+minutes-level value anywhere in that file. Most likely: the tile shows
+`median_lead_response_time_days` (genuinely can be low — real skew already validated for this
+metric, e.g. MM/Ent Feb: median 9 days vs. avg 165) as the headline and
+`avg_lead_response_time_days` as the caption, both mislabeled "m" instead of "d". **Fix is in
+Superblocks, not SQL** — check that tile's unit label.
+
+**"How do we know if their activities went up or down since last month"** — added
+`activity_total_last_month` and `meetings_held_last_month` to `sdr_activity_by_rep.sql` via
+`LAG(...) OVER (PARTITION BY rep ORDER BY month)`. **Deliberately no pre-computed pct_change
+column** — a plain `DIV0(current - last, last)` would show 0% (not "New") the moment a rep
+goes from a real 0-activity prior month to any real number, since `DIV0` special-cases a zero
+denominator to 0 — the exact opposite of what happened, and the exact edge case the MSP tab's
+badge formula (§4.14) already solved correctly. Bind these two raw columns to that SAME
+4-case formula in Superblocks (prior blank/0 + current has volume → "New"; prior has volume +
+current blank/0 → "Stopped"/−100%; both blank/0 → no badge; else plain %) — don't reintroduce
+a naive percent here.
+
+**Time horizon filter** — both `sdr_activity_by_rep.sql` and `sdr_lead_response.sql` already
+accept `{{ LookbackMonths.value }}` (default 6); this is a Superblocks exposure gap, not a
+query gap. Add a filter component bound to that parameter on both tables — a preset selector
+(1/3/6/12 months) is cleaner than a raw number box, matching this dashboard's other Granularity/
+Time Horizon controls.
+
+**A recurring authoring mistake, worth flagging generally**: caught TWICE this session (here
+and in `insights_forward_pipeline_trend.sql`) — a literal semicolon typed inside a SQL comment
+breaks the statement, since the naive multi-statement splitter used to validate these files
+treats every `;` as a statement boundary, comment or not. This repo's own convention is
+already to use `--` as a prose separator, never a literal semicolon, in comment text — worth
+double-checking new header comments for stray semicolons before validating, not just after a
+compile error.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
