@@ -34,6 +34,23 @@
 -- Scoped to New Logo/Expansion/Move In (matches performance_cube.sql's deal-type scope) and
 -- FLEX_UNIT_COUNT IS NOT NULL (a handful of closed deals have no unit count at all -- excluded
 -- from the units view, not zero-filled, so they don't silently understate lost units).
+--
+-- REASON DRILL-DOWN NOW DIMENSION-FILTERABLE (added 2026-08-04) -- Part A used to accept only
+-- `{{ Segment.value }}`. Extended to also accept `{{ Team.value }}` / `{{ Msp.value }}` /
+-- `{{ DealType.value }}` / `{{ Rep.value }}` (same filter set as the new
+-- closed_lost_rate_cube.sql), so the reason
+-- breakdown can be pulled for one SPECIFIC flagged slice -- Kevin: "sham can be like huh we're
+-- losing a lot of x msp deals - why?" A rep filter requires resolving OWNER_SK ->
+-- DIM_EMPLOYEE_HISTORY.FULL_NAME (same real per-record resolution Part C already uses), so
+-- that join is now always present in `reasons`, not added only for Part C.
+--
+-- BUG FIXED 2026-08-04 -- Part B's "fully-elapsed months only" gate compared a calendar-month
+-- bucket against a BP-month LABEL (mixing two different calendars) -- caught building
+-- closed_lost_rate_cube.sql/insights_closed_lost_streak.sql, where the exact same construction
+-- produced a false, dramatic "loss rate spike" concentrated entirely in one barely-started
+-- calendar month (confirmed live 2026-08-05: the BP label had already flipped to Sep BP while
+-- August was only 5 of 31 days old). Fixed here too, to a pure calendar check with no BP-label
+-- mixing: `DATE_TRUNC('month', CLOSED_AT_UTC) < DATE_TRUNC('month', CURRENT_DATE())`.
 
 -- Part A: loss reasons, trailing {{ LookbackMonths.value }} months (default 6), this vs. an
 -- equal-length prior window, categorized.
@@ -61,6 +78,7 @@ reasons AS (
         o.FLEX_UNIT_COUNT,
         IFF(o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, CURRENT_DATE()), 'current_window', 'prior_window') AS window
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE AND e.SOURCE_SYSTEM = 'salesforce'
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED AND NOT o.IS_CLOSED_WON AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
@@ -72,6 +90,16 @@ reasons AS (
             WHEN o.STATIC_TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
             ELSE NULL
         END = '{{Segment.value}}' {{/Segment.value}}
+      {{#Team.value}}      AND CASE
+            WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN o.STATIC_TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN o.STATIC_TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END = '{{Team.value}}'                                                                    {{/Team.value}}
+      {{#Msp.value}}       AND COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set') = '{{Msp.value}}' {{/Msp.value}}
+      {{#DealType.value}}  AND o.OPPORTUNITY_TYPE = '{{DealType.value}}'                            {{/DealType.value}}
+      {{#Rep.value}}        AND e.FULL_NAME = '{{Rep.value}}'                                        {{/Rep.value}}
 )
 SELECT
     COALESCE(CLOSED_LOST_REASON, 'Not Specified') AS reason,
@@ -92,11 +120,6 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-current_bp AS (
-    SELECT IFF(DAY(CURRENT_DATE()) <= 4,
-               DATE_TRUNC('month', CURRENT_DATE()),
-               DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
-),
 scoped AS (
     SELECT o.*,
         CASE
@@ -106,14 +129,12 @@ scoped AS (
             ELSE NULL
         END AS segment_bucket
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-    CROSS JOIN current_bp
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
-      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, current_bp.bp_month_label)
-      -- fully-elapsed BP months only: a closed month counts once its own BP window has fully
-      -- passed (i.e. strictly before the CURRENT BP month), not the in-progress one
-      AND DATE_TRUNC('month', o.CLOSED_AT_UTC) < current_bp.bp_month_label
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, DATE_TRUNC('month', CURRENT_DATE()))
+      -- fully-elapsed calendar months only, pure calendar check -- see header bug note
+      AND DATE_TRUNC('month', o.CLOSED_AT_UTC) < DATE_TRUNC('month', CURRENT_DATE())
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       {{#Segment.value}} AND CASE
             WHEN o.STATIC_TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
