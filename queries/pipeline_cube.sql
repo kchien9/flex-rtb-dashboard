@@ -31,9 +31,11 @@
 -- niro_units_cube.sql already documented for this same table on its own join path.
 --
 -- MULTI-SELECT FILTERS -- {{ Team.value }}/{{ Segment.value }}/{{ Msp.value }}/
--- {{ DealType.value }}/{{ Rep.value }} are comma-separated lists from Superblocks multi-select
--- components (empty = no filter on that dimension). Split via STRTOK_TO_ARRAY and matched with
--- IN, so a single selected value behaves identically to today's single-value dropdown filters.
+-- {{ DealType.value }}/{{ Rep.value }} are comma-separated, pre-quoted literal lists built by
+-- Superblocks multi-select components (empty = no filter on that dimension), substituted
+-- directly into IN (...) via plain Mustache literal substitution -- same convention every other
+-- cube file in this repo uses, NOT STRTOK_TO_ARRAY (no Snowflake array-splitting happens in this
+-- file). A single selected value behaves identically to today's single-value dropdown filters.
 --
 -- MISSING FILTER CAUGHT LIVE 2026-08-05 -- this header already claimed DealType.value as a
 -- supported filter, but the first committed draft never actually selected OPPORTUNITY_TYPE in
@@ -43,6 +45,11 @@
 -- deal_type is filter-only here, never a breakout {{ Dimension.value }} option, so it's
 -- deliberately absent from `periods`' GROUP BY -- see that CTE's own comment for why adding it
 -- there would change nothing anyway.
+--
+-- DEPARTED-REP GRACE PERIOD -- {{ GraceMonths.value }} (default 2, same as every other cube in
+-- this repo) keeps a departed rep's Rep-dimension rows visible for that many months past their
+-- last login before dropping them, instead of vanishing the day IS_ACTIVE flips to FALSE. See
+-- the inline comment on `filtered`'s WHERE clause for the exact condition and scoping.
 --
 -- DUAL TIME COMPARISON -- {{ TargetPeriod.value }} is the period Sham is inspecting (a BP
 -- month or quarter). `prior_period_value` = the immediately preceding period of the same
@@ -96,6 +103,7 @@ open_pipeline AS (
         cr.segment_bucket, cr.team_bucket,
         am.msp,
         e.FULL_NAME AS rep,
+        cr.IS_ACTIVE, cr.LAST_LOGIN_AT_UTC,
         o.OPPORTUNITY_TYPE AS deal_type,
         o.FLEX_UNIT_COUNT AS units,
         'open_pipeline' AS component
@@ -119,6 +127,7 @@ closed_awaiting_rollout AS (
         cr.segment_bucket, cr.team_bucket,
         am.msp,
         e.FULL_NAME AS rep,
+        cr.IS_ACTIVE, cr.LAST_LOGIN_AT_UTC,
         o.OPPORTUNITY_TYPE AS deal_type,
         li.UNIT_COUNT AS units,
         'closed_awaiting_rollout' AS component
@@ -176,6 +185,14 @@ filtered AS (
       {{#Msp.value}}      AND c.msp            IN ({{Msp.value}})      {{/Msp.value}}
       {{#DealType.value}} AND c.deal_type      IN ({{DealType.value}}) {{/DealType.value}}
       {{#Rep.value}}      AND c.rep            IN ({{Rep.value}})      {{/Rep.value}}
+      -- DEPARTED-REP GRACE PERIOD, SCOPED TO THE REP DIMENSION ONLY -- caught in code review
+      -- 2026-08-05: `current_rep` already selected IS_ACTIVE/LAST_LOGIN_AT_UTC but nothing ever
+      -- read them, so a departed rep's open pipeline/closed-awaiting-rollout units could show up
+      -- under the Rep breakout with no grace period at all. Same pattern closed_lost_rate_cube.
+      -- sql already applies, scoped the same way (departed-rep filter bites ONLY when Dimension=
+      -- 'rep' -- applying it unconditionally would corrupt Segment/Team/MSP totals, same lesson
+      -- niro_units_cube.sql's header already documents for stock aggregates).
+      AND (NOT ('{{ Dimension.value }}' = 'rep') OR c.IS_ACTIVE OR c.LAST_LOGIN_AT_UTC >= DATEADD(month, -{{ GraceMonths.value }}, CURRENT_DATE()))
 ),
 periods AS (
     -- deal_type is filter-only, never a breakout dimension (Dimension.value only ever resolves
