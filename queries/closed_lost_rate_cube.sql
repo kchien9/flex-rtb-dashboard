@@ -17,9 +17,19 @@
 -- reason to use the BP calendar here. The BP calendar IS still used, but only as a completeness
 -- gate (see below), not as the grouping grain.
 --
--- FULLY-ELAPSED MONTHS ONLY -- reuses closed_lost_analysis.sql Part B's exact censoring
--- pattern: a calendar month only counts once it's strictly before the CURRENT BP month label,
--- so an in-progress month's single-digit closed-deal count never reads as a rate collapse.
+-- FULLY-ELAPSED MONTHS ONLY -- BUG CAUGHT LIVE 2026-08-04: the first draft reused
+-- closed_lost_analysis.sql Part B's exact censoring check (calendar month < BP month label) --
+-- that mixes two different calendars and is wrong specifically in the early days of a calendar
+-- month. Confirmed live: on 2026-08-05, DAY(CURRENT_DATE()) > 4 already flips the BP label to
+-- Sep BP (2026-09-01), so "calendar month < 2026-09-01" let August 2026 -- 5 of 31 days in --
+-- through as "complete." Every dimension immediately showed a dramatic, simultaneous
+-- "streak" of 72-98% loss rates concentrated in that one barely-started month -- the classic
+-- tiny-sample-looks-like-a-collapse artifact this repo's own censoring logic exists to
+-- prevent, not something this file was supposed to reintroduce. Fixed to a pure calendar
+-- check with no BP-label mixing at all: `DATE_TRUNC('month', CLOSED_AT_UTC) <
+-- DATE_TRUNC('month', CURRENT_DATE())`. This is a pre-existing bug in `closed_lost_analysis.sql`
+-- Part B too (same construction, copied from there) -- worth fixing there as well, flagged in
+-- that file's own header where this cube's Part B logic gets consolidated.
 --
 -- MSP via PARTNER_MANAGEMENT_SOFTWARE (deal-grain) -- same field insights_declining_streaks.sql
 -- Part B already validated for MSP pipeline analysis. Rep via OWNER_SK -> DIM_EMPLOYEE_HISTORY,
@@ -50,11 +60,6 @@ WITH pmc_size AS (
       AND IS_IN_NETWORK
     GROUP BY 1
 ),
-current_bp AS (
-    SELECT IFF(DAY(CURRENT_DATE()) <= 4,
-               DATE_TRUNC('month', CURRENT_DATE()),
-               DATE_TRUNC('month', DATEADD(month, 1, CURRENT_DATE()))) AS bp_month_label
-),
 user_dedup AS (
     SELECT FULL_NAME, IS_ACTIVE, LAST_LOGIN_AT_UTC
     FROM FLEX.STG_SALESFORCE.STG_SALESFORCE__USER
@@ -81,7 +86,6 @@ scoped AS (
         COALESCE(o.PARTNER_MANAGEMENT_SOFTWARE, 'Not Set') AS msp,
         o.OPPORTUNITY_TYPE AS deal_type
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-    CROSS JOIN current_bp
     LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e
         ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE AND e.SOURCE_SYSTEM = 'salesforce'
     LEFT JOIN user_dedup cr ON cr.FULL_NAME = e.FULL_NAME
@@ -89,8 +93,8 @@ scoped AS (
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED
       AND o.OPPORTUNITY_TYPE IN ('New Logo', 'Expansion', 'Move In')
-      AND DATE_TRUNC('month', o.CLOSED_AT_UTC) < current_bp.bp_month_label
-      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1), current_bp.bp_month_label)
+      AND DATE_TRUNC('month', o.CLOSED_AT_UTC) < DATE_TRUNC('month', CURRENT_DATE())
+      AND o.CLOSED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }} * IFF('{{ Granularity.value }}' = 'Quarter', 3, 1), DATE_TRUNC('month', CURRENT_DATE()))
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
       -- departed-rep grace check: only bites when slicing by rep, see header
       AND (NOT ('{{ Dimension.value }}' = 'rep') OR cr.FULL_NAME IS NULL OR cr.IS_ACTIVE
