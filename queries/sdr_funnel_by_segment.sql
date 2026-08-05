@@ -145,6 +145,9 @@ SELECT
     COALESCE(mt.meetings_held, 0)                      AS meetings_held,
     DIV0(COALESCE(mt.meetings_held, 0), COALESCE(mt.meetings_booked, 0)) AS meetings_held_rate,
     COALESCE(mt.meetings_held_inbound, 0)              AS meetings_held_inbound,
+    -- Added 2026-08-05, same clarity fix as sdr_activity_by_rep.sql -- explicit outbound
+    -- count instead of making the reader subtract inbound from held themselves.
+    COALESCE(mt.meetings_held, 0) - COALESCE(mt.meetings_held_inbound, 0) AS meetings_held_outbound,
     DIV0(COALESCE(mt.meetings_held_inbound, 0), COALESCE(mt.meetings_held, 0)) AS inbound_share_of_held,
     COALESCE(p.pipeline_created, 0)                    AS pipeline_created,
     mo.mo = DATE_TRUNC('month', CURRENT_DATE())        AS is_partial_month
