@@ -238,7 +238,55 @@ judgment): prefer the fact with the most concrete, specific number — a multi-m
 a 1-month streak; a personal best is more specific than a generic good month; a high new-logo
 count is a fine substitute when neither of the other two is notable.
 
-**Style**: bullets, plain language, no unexplained jargon — see §4.11, applies here too.
+**Style — REWRITTEN 2026-08-05, Kevin: "the way the shoutouts are written rn is just statements
+of facts... it needs to read a bit more messagey."** This is the exact opposite instruction of
+§4.11 (which governs the analytical Debrief tab — dry, no hype, "flag it, don't spin it"). Shout
+Outs is a Slack post meant to be copy-pasted into a team channel, not a data callout — it should
+read like a teammate wrote it, not like a report. Replace the prompt's style guidance for this
+block ONLY with:
+
+> "Write like you're the one hyping this up in the team Slack channel, not reporting a metric.
+> Use an exclamation point, an emoji if it fits naturally, and language a person would actually
+> type (great month, crushed it, on fire, let's go) — not a restated number with no energy.
+> Still only ONE sentence per team, still zero comparison to teammates."
+
+Concrete before/after (same underlying fact, different write-up):
+| Flat (current, wrong) | Messagey (target) |
+|---|---|
+| "Cory Baach hit a personal best this month with 38,158 units rolled out." | "🔥 Cory Baach just posted his best month yet — 38K units rolled out. Let's go!" |
+| "Dana's Team rolled out 128,331 units this month, up 30% from last month." | "📈 Dana's Team is on fire this month — units up 30% MoM. Keep it going!" |
+
+**Team-wide callouts, ADDED 2026-08-05** (`team_shout_outs_facts.sql`, new sibling file to
+`shout_outs_facts.sql` — that file is unchanged, still rep-grain). Kevin: "can we do team wide
+callouts too? like 'the team rolled out 3x more units this month than last!'" Two fact blocks,
+both self-referential (a team/pod vs. its OWN prior period, never vs. another team — same
+framing rule as the rep-level facts):
+
+- **Part A — AE team units, MoM** (`fact_type = 'team_units'`): all 4 AE teams, `this_period_
+  value`/`last_period_value`/`ratio`/`pct_change`. **Real numbers as of 2026-08-05, for
+  calibration — Kevin's own "3x" example was illustrative, not real**: Dana's +30%, Brandon's
+  +29%, Rory's +18%, Sebastian's +18%. Tell the LLM to use the ACTUAL `pct_change` value, phrased
+  as "+18%" or "nearly a third more" — never force a "3x" framing that isn't in the data.
+- **Part B — SDR pod activity, MoM** (`fact_type = 'sdr_calls'` / `'sdr_meetings_held'`): SMB /
+  MM/Ent / Strategic pods. **As of 2026-08-05 this is flat-to-down, not a growth story** (calls
+  -4% to -9%, one pod +1%; meetings_held mostly floored out as too small a sample to report).
+  **This is the important part**: if this block returns rows showing a decline or nothing at
+  all, the prompt must NOT invent a "crushed it" line for SDRs that period — either state the
+  real direction plainly ("SDR call volume held steady" / skip entirely if it's a real decline
+  and there's nothing positive to say) or omit the SDR line from that period's message. Do not
+  let the messagey tone above turn into fabricating a win that isn't there — upbeat framing
+  applies to REAL positive facts, it's not license to spin a flat month into a fake one.
+- Both parts have their own materiality floors baked into the SQL (team units ≥2,000 combined
+  units; calls ≥200 last-period; meetings_held ≥10 last-period) — a row only appears here if
+  it already cleared that bar, no additional filtering needed downstream.
+
+**Placement**: same combined block as the rep-level shout-outs, team-wide lines can lead
+(company/team-level naturally reads first in a leadership Slack post) with the per-rep lines
+following, or as a clearly separated second paragraph — either works, just don't interleave a
+team line and a rep line into one run-on sentence.
+
+**Style**: bullets, plain language, no unexplained jargon — see §4.11, applies here too — EXCEPT
+tone, which is the messagey override above, specific to this one block.
 
 ## 4.7. Trend Team button removal (2026-07-30)
 

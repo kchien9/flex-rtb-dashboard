@@ -25,7 +25,16 @@
 --      #2 or #3 below.
 --   2. is_personal_best -- this month's rolled-out units are higher than any of their own
 --      trailing 5 months. Purely self-referential, zero comparison to teammates -- the safest
---      fact type given the framing rule above.
+--      fact type given the framing rule above. IMPORTANT SCOPE NOTE (clarified 2026-08-05, per
+--      Kevin's "are you sure about the personal bests? how do u know"): this is a "best of the
+--      trailing 6 months" claim, NOT a literal career-best -- there's no lifetime lookback here.
+--      Verified live against 4 real featured reps (Cory Baach, Umar Khan, Caleb Benson, Brianne
+--      Santa-Donato): all 4 claims were arithmetically correct (this month was the max of their
+--      own 6-month window). One nuance worth knowing, not a bug: a rep can satisfy the
+--      `prior_month_count >= 2` guard with EXACTLY 2 prior months (a newer rep who just started
+--      ramping) -- their claim is still true, but rests on a thinner comparison base than a rep
+--      with a full 6-month history. Don't relabel this as "career best" in narration without
+--      building a real lifetime lookback first.
 --   3. new_logo_deals_this_month -- real, simple, positive count, via FCT_CRM_OPPORTUNITY
 --      OWNER_SK (current identity), Closed Won, New Logo only. Validated live: real range is
 --      0-13 deals this month across reps -- meaningfully different between people, a genuine
