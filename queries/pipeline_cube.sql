@@ -35,6 +35,15 @@
 -- components (empty = no filter on that dimension). Split via STRTOK_TO_ARRAY and matched with
 -- IN, so a single selected value behaves identically to today's single-value dropdown filters.
 --
+-- MISSING FILTER CAUGHT LIVE 2026-08-05 -- this header already claimed DealType.value as a
+-- supported filter, but the first committed draft never actually selected OPPORTUNITY_TYPE in
+-- either `open_pipeline`/`closed_awaiting_rollout`, so the filter silently did nothing (Task 9's
+-- Superblocks wiring doc assumes every cube supports it). Fixed: added `deal_type` to both CTEs
+-- and a `{{#DealType.value}} AND c.deal_type IN (...) {{/DealType.value}}` block in `filtered`.
+-- deal_type is filter-only here, never a breakout {{ Dimension.value }} option, so it's
+-- deliberately absent from `periods`' GROUP BY -- see that CTE's own comment for why adding it
+-- there would change nothing anyway.
+--
 -- DUAL TIME COMPARISON -- {{ TargetPeriod.value }} is the period Sham is inspecting (a BP
 -- month or quarter). `prior_period_value` = the immediately preceding period of the same
 -- grain. `trailing_avg_value` = trailing-4-quarters average if Granularity=Quarter, trailing-
@@ -87,6 +96,7 @@ open_pipeline AS (
         cr.segment_bucket, cr.team_bucket,
         am.msp,
         e.FULL_NAME AS rep,
+        o.OPPORTUNITY_TYPE AS deal_type,
         o.FLEX_UNIT_COUNT AS units,
         'open_pipeline' AS component
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
@@ -109,6 +119,7 @@ closed_awaiting_rollout AS (
         cr.segment_bucket, cr.team_bucket,
         am.msp,
         e.FULL_NAME AS rep,
+        o.OPPORTUNITY_TYPE AS deal_type,
         li.UNIT_COUNT AS units,
         'closed_awaiting_rollout' AS component
     FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
@@ -160,12 +171,21 @@ filtered AS (
     -- its own bucket instead of vanishing (same COALESCE(..., 'Not Set') convention every other
     -- cube file in this repo already uses for its dimension column).
     WHERE c.segment_bucket IS NOT NULL
-      {{#Team.value}}    AND c.team_bucket    IN ({{Team.value}})    {{/Team.value}}
-      {{#Segment.value}} AND c.segment_bucket IN ({{Segment.value}}) {{/Segment.value}}
-      {{#Msp.value}}     AND c.msp            IN ({{Msp.value}})     {{/Msp.value}}
-      {{#Rep.value}}     AND c.rep            IN ({{Rep.value}})     {{/Rep.value}}
+      {{#Team.value}}     AND c.team_bucket    IN ({{Team.value}})     {{/Team.value}}
+      {{#Segment.value}}  AND c.segment_bucket IN ({{Segment.value}})  {{/Segment.value}}
+      {{#Msp.value}}      AND c.msp            IN ({{Msp.value}})      {{/Msp.value}}
+      {{#DealType.value}} AND c.deal_type      IN ({{DealType.value}}) {{/DealType.value}}
+      {{#Rep.value}}      AND c.rep            IN ({{Rep.value}})      {{/Rep.value}}
 ),
 periods AS (
+    -- deal_type is filter-only, never a breakout dimension (Dimension.value only ever resolves
+    -- to segment_bucket/team_bucket/msp/rep, see `filtered` above) -- deliberately NOT added to
+    -- this GROUP BY. Confirmed live it wouldn't change anything even if added: this CTE already
+    -- only selects expected_month/entity/component from `filtered`, so a row's deal_type is
+    -- aggregated away by the SUM(units) regardless -- adding it here would just re-explode rows
+    -- back out by deal type underneath every entity, which is not what any Dimension option asks
+    -- for. If a future Subject ever needs a deal-type breakout, that's a new {{ Dimension.value }}
+    -- branch in `filtered`, not a change to this GROUP BY.
     SELECT expected_month, entity, component,
         SUM(units) AS units
     FROM filtered
