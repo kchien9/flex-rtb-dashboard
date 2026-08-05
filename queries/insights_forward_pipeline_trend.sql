@@ -33,6 +33,17 @@
 -- pushed to a different month or closed lost, either of which Sham would want named, not just
 -- implied by a units delta.
 --
+-- BUG CAUGHT AND FIXED LIVE 2026-08-05, PART B -- the first draft's `scoped` CTE filtered
+-- `WHERE NOT o.IS_CLOSED` as a blanket population filter, meaning any deal that was open
+-- {{ AsOfDaysAgo.value }} days ago but has SINCE closed (won or lost) got silently excluded
+-- from the ENTIRE query, not just from today's slice -- confirmed live, 112 real deals in the
+-- next-3-months window fit this exact pattern. This deflated BOTH as_of_today and
+-- as_of_n_days_ago for that cohort, since the row never appeared in either column. Fixed:
+-- `scoped` no longer pre-filters on IS_CLOSED at all -- "currently open" is applied ONLY inside
+-- the as-of-today conditional aggregate, while as-of-N-days-ago uses the purely historical
+-- existed-and-was-open condition regardless of what happened to the deal afterward.
+-- `deals_since_closed_lost` surfaces the real-loss component of that gap explicitly.
+--
 -- SEGMENT BREAKDOWN IS NEW -- neither part of pipeline_forecast.sql cuts by segment_bucket
 -- (Part A there only has team_bucket, Part B has no breakdown at all). Added here specifically
 -- so a company-wide decline can be attributed to a driver, per Kevin's own example ("strategic
@@ -43,7 +54,7 @@
 -- TWO LEGS, NOT BLENDED -- same non-negotiable rule pipeline_forecast.sql's header already
 -- established: closed-awaiting-rollout carries real 88% historical accuracy, open pipeline is
 -- unweighted face value with no accuracy backing. Part A is the high-confidence leg (the one
--- that should actually drive a callout); Part B is the low-confidence leg (context only, never
+-- that should actually drive a callout) -- Part B is the low-confidence leg (context only, never
 -- the headline). Same DSMB exclusion, New Vertical exclusion (2026-08-05 fix), and 5-year
 -- sanity ceiling as pipeline_forecast.sql.
 
@@ -106,7 +117,7 @@ target_months AS (
 ),
 scoped AS (
     SELECT o.OPPORTUNITY_ID, o.FLEX_UNIT_COUNT, o.ANTICIPATED_GO_LIVE_AT_UTC,
-        o.CREATED_AT_UTC, o.CLOSED_AT_UTC,
+        o.CREATED_AT_UTC, o.CLOSED_AT_UTC, o.IS_CLOSED, o.IS_CLOSED_WON,
         COALESCE(
             CASE
                 WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
@@ -118,22 +129,32 @@ scoped AS (
     LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
-    WHERE NOT o.IS_CLOSED
-      AND o.OPPORTUNITY_TYPE != 'New Vertical'
+    -- NOT restricted to NOT IS_CLOSED here -- see header bug note. A deal open 30 days ago
+    -- that has SINCE closed (won or lost) must still count toward the as-of-N-days-ago figure --
+    -- "currently open" is only the correct condition for the as-of-TODAY figure, applied below
+    -- inside the conditional aggregates, not as a blanket population filter.
+    WHERE o.OPPORTUNITY_TYPE != 'New Vertical'
       AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(year, 5, CURRENT_DATE())
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
 )
 SELECT
     tm.target_month,
     s.segment_bucket,
-    SUM(s.FLEX_UNIT_COUNT)                                                          AS units_as_of_today,
-    COUNT(DISTINCT s.OPPORTUNITY_ID)                                                AS deals_as_of_today,
+    SUM(IFF(NOT s.IS_CLOSED, s.FLEX_UNIT_COUNT, 0))                                 AS units_as_of_today,
+    COUNT(DISTINCT IFF(NOT s.IS_CLOSED, s.OPPORTUNITY_ID, NULL))                    AS deals_as_of_today,
     SUM(IFF(s.CREATED_AT_UTC <= DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())
             AND (s.CLOSED_AT_UTC IS NULL OR s.CLOSED_AT_UTC > DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())),
             s.FLEX_UNIT_COUNT, 0))                                                  AS units_as_of_n_days_ago,
     COUNT(DISTINCT IFF(s.CREATED_AT_UTC <= DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())
             AND (s.CLOSED_AT_UTC IS NULL OR s.CLOSED_AT_UTC > DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())),
-            s.OPPORTUNITY_ID, NULL))                                                AS deals_as_of_n_days_ago
+            s.OPPORTUNITY_ID, NULL))                                                AS deals_as_of_n_days_ago,
+    -- Real signal, not noise: deals that WERE in the as-of-N-days-ago cohort but have since
+    -- closed lost -- these explain part of any gap between the two columns beyond normal
+    -- pipeline build. Shown separately so a real loss doesn't get buried inside a units delta.
+    COUNT(DISTINCT IFF(s.CREATED_AT_UTC <= DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())
+            AND s.CLOSED_AT_UTC > DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())
+            AND s.IS_CLOSED AND NOT s.IS_CLOSED_WON,
+            s.OPPORTUNITY_ID, NULL))                                                AS deals_since_closed_lost
 FROM target_months tm
 JOIN scoped s ON DATE_TRUNC('month', s.ANTICIPATED_GO_LIVE_AT_UTC) = tm.target_month
 GROUP BY 1, 2
