@@ -48,10 +48,34 @@
 --
 -- Same DSMB exclusion (Pattern B via DIM_CRM_ACCOUNT_HISTORY.PMC_ID) as performance_cube.sql/
 -- closed_lost_analysis.sql. No materiality floor in this cube itself -- this is the raw-detail
--- data source; the floor lives in the streak scanner (insights_closed_lost_streak.sql), same
+-- data source -- the floor lives in the streak scanner (insights_closed_lost_streak.sql), same
 -- split as rolled_out_units_cube.sql (unfloored) vs. its downstream scanners (floored).
 --
 -- Month/Quarter {{ Granularity.value }} toggle built in from the start.
+--
+-- MULTI-SELECT, added 2026-08-05 -- same change as rolled_out_units_cube.sql / niro_units_cube.
+-- sql's own header writeup (same commit series, Debrief restructure): all 5 filters below
+-- (Team/Segment/Msp/DealType/Rep) are now `IN ({{X.value}})`, not `= '{{X.value}}'`. The QUOTES
+-- are no longer supplied by this file -- {{X.value}} must render as an already-quoted, comma-
+-- separated list (e.g. Team.value -> 'Brandon''s Team' for one selection, 'Brandon''s
+-- Team','Dana''s Team' for two), with every embedded apostrophe already doubled, before it
+-- reaches this query. A single-value multi-select is regression-tested to behave identically
+-- to the old single-dropdown `=` filter.
+--
+-- DUAL TIME COMPARISON, added 2026-08-05 (Debrief restructure, docs/superpowers/specs/2026-08-
+-- 05-debrief-restructure-design.md, item 7) -- this file's plan entry is explicit that the
+-- comparison belongs on the RATE (loss_rate_by_units), not on raw won/lost counts -- a rate and
+-- a count are different things, and this file's own header above already explains why a raw
+-- lost-deal count isn't the signal (it rides total deal volume). Added loss_rate_by_units_
+-- prior_period (LAG of the rate itself) and loss_rate_by_units_trailing_avg_6period (ROWS
+-- BETWEEN 6 PRECEDING AND 1 PRECEDING, EXCLUDING the current row so it's an independent
+-- baseline, not double-counting the row it's being compared against -- same reasoning as
+-- rolled_out_units_cube.sql's new_integrated_units_trailing_avg_6mo and niro_units_cube.sql's
+-- niro_units_trailing_avg_6period). Named "_6period", not "_6mo", because this file's period
+-- column can be Month OR Quarter ({{ Granularity.value }}), matching niro_units_cube.sql's
+-- naming convention rather than rolled_out's month-specific one. This file had no pre-existing
+-- window function to extend (unlike the other two cubes) -- built fresh directly on
+-- loss_rate_by_units per the plan's explicit instruction.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -113,13 +137,29 @@ SELECT
     SUM(IFF(IS_CLOSED_WON, FLEX_UNIT_COUNT, 0))                                 AS units_won,
     SUM(IFF(NOT IS_CLOSED_WON, FLEX_UNIT_COUNT, 0))                             AS units_lost,
     DIV0(SUM(IFF(NOT IS_CLOSED_WON, FLEX_UNIT_COUNT, 0)),
-         SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0)))             AS loss_rate_by_units
+         SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0)))             AS loss_rate_by_units,
+    -- Dual time comparison (see header) -- extends loss_rate_by_units, the rate itself, per
+    -- the plan's explicit instruction not to substitute raw won/lost counts. Expression is
+    -- recomputed inside LAG/AVG rather than referencing the loss_rate_by_units alias, and
+    -- PARTITION BY/ORDER BY recompute the slice/period expressions rather than referencing
+    -- those aliases -- same convention rolled_out_units_cube.sql/niro_units_cube.sql already
+    -- established for window functions layered on top of a GROUP BY in this repo.
+    LAG(DIV0(SUM(IFF(NOT IS_CLOSED_WON, FLEX_UNIT_COUNT, 0)),
+             SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0))))
+        OVER (PARTITION BY segment_bucket, team_bucket, COALESCE({{ Dimension.value }}, 'Not Set')
+              ORDER BY IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', DATE_TRUNC('month', CLOSED_AT_UTC)), DATE_TRUNC('month', CLOSED_AT_UTC)))
+                                                                                 AS loss_rate_by_units_prior_period,
+    AVG(DIV0(SUM(IFF(NOT IS_CLOSED_WON, FLEX_UNIT_COUNT, 0)),
+             SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0))))
+        OVER (PARTITION BY segment_bucket, team_bucket, COALESCE({{ Dimension.value }}, 'Not Set')
+              ORDER BY IFF('{{ Granularity.value }}' = 'Quarter', DATE_TRUNC('quarter', DATE_TRUNC('month', CLOSED_AT_UTC)), DATE_TRUNC('month', CLOSED_AT_UTC))
+              ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)                        AS loss_rate_by_units_trailing_avg_6period
 FROM scoped
 WHERE segment_bucket IS NOT NULL
-  {{#Team.value}}     AND team_bucket = '{{Team.value}}'         {{/Team.value}}
-  {{#Segment.value}}  AND segment_bucket = '{{Segment.value}}'   {{/Segment.value}}
-  {{#Msp.value}}       AND msp = '{{Msp.value}}'                  {{/Msp.value}}
-  {{#DealType.value}}  AND deal_type = '{{DealType.value}}'       {{/DealType.value}}
-  {{#Rep.value}}        AND rep = '{{Rep.value}}'                  {{/Rep.value}}
+  {{#Team.value}}     AND team_bucket IN ({{Team.value}})         {{/Team.value}}
+  {{#Segment.value}}  AND segment_bucket IN ({{Segment.value}})   {{/Segment.value}}
+  {{#Msp.value}}       AND msp IN ({{Msp.value}})                  {{/Msp.value}}
+  {{#DealType.value}}  AND deal_type IN ({{DealType.value}})       {{/DealType.value}}
+  {{#Rep.value}}        AND rep IN ({{Rep.value}})                  {{/Rep.value}}
 GROUP BY 1, 2, 3, 4
 ORDER BY 1, 2, 3, 4;
