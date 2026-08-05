@@ -17,7 +17,7 @@
 -- on unrelated prior deals).
 --
 -- MEDIAN SHOWN ALONGSIDE AVG, SAME REASON AS rep_touch_diligence.sql/insights_deal_size_
--- trend.sql -- check live before trusting avg alone; one outlier account can skew it.
+-- trend.sql -- check live before trusting avg alone -- one outlier account can skew it.
 --
 -- Same DSMB exclusion, same New-Logo-only scope as sdr_funnel_by_segment.sql.
 
