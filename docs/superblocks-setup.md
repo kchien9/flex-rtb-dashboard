@@ -619,6 +619,64 @@ color always means the same MSP everywhere, not just within one chart. Absolute 
 100%-normalized) — Kevin's explicit call: segment proportions within each bar already read as
 share visually without losing the total-volume signal a normalized chart would hide.
 
+## 4.15. Closed Lost Analysis: multi-dimension loss rate + reason drill-down (written down 2026-08-04)
+
+Kevin: "how can we build out closed lost analysis. maybe show closed lost by segment, MSP,
+deal type, rep. make it % so it takes into consideration the volume of opps. maybe closed
+lost reason too? so Sham can be like 'huh we're losing a lot of X MSP deals — why?'" Picks up
+the Stage 2 backlog item flagged in §4.12 ("generalize `insights_closed_lost_trend.sql` into a
+multi-entity scanner").
+
+**New file `queries/closed_lost_rate_cube.sql`** — same `{{ Dimension.value }}` one-query-
+drives-every-slice pattern as `rolled_out_units_cube.sql`/`niro_units_cube.sql`. Options:
+`segment_bucket` / `team_bucket` / `msp` (`PARTNER_MANAGEMENT_SOFTWARE`) / `deal_type`
+(`OPPORTUNITY_TYPE`) / `rep`. Outputs `loss_rate_by_deals` and `loss_rate_by_units` side by
+side — units is primary (this dashboard's standing convention), deal count sits next to it so
+a single large lost deal doesn't read as a rate collapse on its own. Consolidates
+`closed_lost_analysis.sql`'s Part B (segment) and Part C (rep) into one cube, extended to
+cover the two dimensions that had no coverage anywhere: MSP and Deal Type.
+
+**Departed-rep filter scoped to the rep dimension only** — a real lesson carried over from
+building the NIRO tab (§4.13): applying a rep-status filter uniformly across every dimension
+corrupts non-rep aggregates. Kevin's standing rule about not showing inactive reps is
+specifically about rep-level views (matches `closed_lost_analysis.sql` Part C's existing
+behavior) — so here the grace-period check is a plain string-literal comparison,
+`(NOT ('{{ Dimension.value }}' = 'rep') OR ...)`, and only bites when actually slicing by rep.
+
+**New file `queries/insights_closed_lost_streak.sql`** — same partitioned gaps-and-islands
+streak technique as the other 9 scanners, applied to `loss_rate_by_units`: Part A (segment),
+Part B (team), Part C (MSP), Part D (deal type). Direction matters — only a RISING loss rate
+is flagged, same convention as the NIRO mix-trend and churn-rising scanners. Materiality floor
+on DEAL COUNT, not units (a rate metric's noise driver is few deals, not raw volume). Rep
+excluded from this scanner entirely — same reasoning as `closed_lost_analysis.sql` Part C, a
+single month's per-rep closed-deal count is too small-sample for a streak.
+
+**Reason drill-down, tied to dimension** — `closed_lost_analysis.sql` Part A extended to
+accept the same `{{ Team.value }}`/`{{ Msp.value }}`/`{{ DealType.value }}`/`{{ Rep.value }}`
+filters as the cube (previously Segment-only), so a specific flagged slice's reasons can be
+pulled directly, keeping the existing `is_administrative` real-loss-vs-hygiene-cleanup split.
+**Validated live, the actual scenario Kevin described**: `insights_closed_lost_streak.sql`
+Part B flagged a real 6-month rising loss-rate streak on Sebastian's Team (now 43.5% by
+units). Filtering the reason drill-down to that same team surfaced real, non-administrative
+drivers — "Went With Embed Option Instead of DI" (35 deals, up from 0 in the prior window) and
+"Contact stopped responding" (40 deals, up from 1) — no hardcoded competitor/integration logic
+needed; the reason field already captures exactly the kind of answer Kevin was picturing.
+
+**A real bug caught building this, worth remembering generally**: the "fully-elapsed months
+only" censoring check in the first drafts (and in the pre-existing `closed_lost_analysis.sql`
+Part B) compared a CALENDAR-month bucket against a BP-month LABEL — two different calendars.
+Confirmed live on 2026-08-05: `DAY(CURRENT_DATE()) > 4` had already flipped the BP label to
+Sep BP (2026-09-01), so "calendar month < 2026-09-01" let August — 5 of 31 days old — through
+as "complete." Every dimension immediately flagged a fake, simultaneous "1-period rising
+streak" at 72-98% loss rates, all concentrated in that one barely-started month — the exact
+tiny-sample-looks-like-a-collapse artifact this repo's censoring logic exists to prevent, not
+something any of these files were supposed to reintroduce. Fixed everywhere in this pass to a
+pure calendar check with no BP-label mixing: `DATE_TRUNC('month', CLOSED_AT_UTC) <
+DATE_TRUNC('month', CURRENT_DATE())`. **Rule going forward**: any file that groups by calendar
+month (deal-closing files, not rollout files) must gate completeness with a pure calendar
+comparison — never reach for the BP-month label just because it's the "is this period done"
+pattern used elsewhere; that pattern is only correct when the grouping grain is ALSO BP-month.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
