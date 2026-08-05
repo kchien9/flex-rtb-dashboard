@@ -159,3 +159,93 @@ FROM target_months tm
 JOIN scoped s ON DATE_TRUNC('month', s.ANTICIPATED_GO_LIVE_AT_UTC) = tm.target_month
 GROUP BY 1, 2
 ORDER BY 1, 2;
+
+-- Part C: the actual decline flag + driver, pre-computed so the LLM never does the subtraction
+-- itself (same rule this file's header already states -- "don't ask an LLM to also compute
+-- the numbers itself").
+--
+-- BUILT ON PART B (OPEN PIPELINE), NOT PART A -- a real reversal of the "Part A drives the
+-- callout" framing stated above, worth explaining plainly. Part A (closed-awaiting-rollout)
+-- can only ever GROW -- once a deal is IS_CLOSED_WON it never un-closes, so
+-- units_as_of_n_days_ago can never exceed units_as_of_today there by construction (confirmed
+-- live -- every Part A row so far has an as-of-N-days-ago of exactly 0 or less than today).
+-- A real DECLINE -- the thing Kevin actually wants flagged -- can only show up on the leg
+-- where deals can leave a cohort: Part B, where a deal open 30 days ago can have since closed
+-- lost or gotten pushed to a different month. So despite Part B being the lower-confidence
+-- leg, it's the only one that can mechanically produce the signal this feature exists to
+-- catch. The narration MUST say so explicitly -- "next month's open pipeline has weakened"
+-- carries real uncertainty (unweighted face value, no accuracy backing per pipeline_forecast.
+-- sql's own validation), not "we're going to miss the number."
+WITH pmc_size AS (
+    SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
+    FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS
+    WHERE BP_MONTH = (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS)
+      AND IS_IN_NETWORK
+    GROUP BY 1
+),
+target_months AS (
+    SELECT DATEADD(month, SEQ4() + 1, DATE_TRUNC('month', CURRENT_DATE())) AS target_month
+    FROM TABLE(GENERATOR(ROWCOUNT => {{ TargetMonthsAhead.value }}))
+),
+scoped AS (
+    SELECT o.OPPORTUNITY_ID, o.FLEX_UNIT_COUNT, o.ANTICIPATED_GO_LIVE_AT_UTC,
+        o.CREATED_AT_UTC, o.CLOSED_AT_UTC, o.IS_CLOSED, o.IS_CLOSED_WON,
+        COALESCE(
+            CASE
+                WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+                WHEN e.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+                WHEN e.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+                ELSE NULL
+            END, 'Not Set') AS segment_bucket
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.IS_CURRENT = TRUE
+    LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
+    LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
+    WHERE o.OPPORTUNITY_TYPE != 'New Vertical'
+      AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(year, 5, CURRENT_DATE())
+      AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
+),
+by_segment AS (
+    SELECT
+        tm.target_month,
+        s.segment_bucket,
+        SUM(IFF(NOT s.IS_CLOSED, s.FLEX_UNIT_COUNT, 0)) AS units_today,
+        SUM(IFF(s.CREATED_AT_UTC <= DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())
+                AND (s.CLOSED_AT_UTC IS NULL OR s.CLOSED_AT_UTC > DATEADD(day, -{{ AsOfDaysAgo.value }}, CURRENT_DATE())),
+                s.FLEX_UNIT_COUNT, 0)) AS units_n_days_ago
+    FROM target_months tm
+    JOIN scoped s ON DATE_TRUNC('month', s.ANTICIPATED_GO_LIVE_AT_UTC) = tm.target_month
+    GROUP BY 1, 2
+),
+company_wide AS (
+    SELECT target_month,
+        SUM(units_today) AS total_units_today,
+        SUM(units_n_days_ago) AS total_units_n_days_ago,
+        DIV0(SUM(units_today) - SUM(units_n_days_ago), SUM(units_n_days_ago)) AS pct_change
+    FROM by_segment
+    GROUP BY 1
+),
+driver AS (
+    -- the segment contributing the single largest NEGATIVE unit delta -- Kevin's own example
+    -- ("strategic segment was driver w 50% less units")
+    SELECT target_month, segment_bucket, units_today, units_n_days_ago,
+        DIV0(units_today - units_n_days_ago, units_n_days_ago) AS segment_pct_change,
+        units_today - units_n_days_ago AS segment_unit_delta
+    FROM by_segment
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY target_month ORDER BY (units_today - units_n_days_ago) ASC) = 1
+)
+SELECT
+    cw.target_month,
+    cw.total_units_today,
+    cw.total_units_n_days_ago,
+    ROUND(cw.pct_change, 4) AS company_pct_change,
+    d.segment_bucket AS driver_segment,
+    ROUND(d.segment_pct_change, 4) AS driver_segment_pct_change,
+    d.segment_unit_delta AS driver_segment_unit_delta
+FROM company_wide cw
+JOIN driver d ON d.target_month = cw.target_month
+-- materiality floor: only surface a real decline on a base big enough to matter -- validate
+-- this default against real distribution before treating it as final
+WHERE cw.total_units_n_days_ago >= {{ MinUnitsFloor.value }}
+  AND cw.pct_change <= -{{ MinPctDeclineThreshold.value }}
+ORDER BY cw.target_month;
