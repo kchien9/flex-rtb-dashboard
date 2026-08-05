@@ -46,10 +46,25 @@
 -- whole period. `rolling_avg_7d` computed here in SQL rather than left to Superblocks, same
 -- principle as `cumulative_units` already being server-computed -- one source of truth for the
 -- math, not reimplemented client-side.
+--
+-- WEEKENDS EXCLUDED, BUSINESS DAYS ONLY (added 2026-08-05) -- Kevin: "can we remove weekends?
+-- and make the 7 day trending avg just looks at biz days." `date_spine` now filters out
+-- Saturday/Sunday (`DAYOFWEEK(day) NOT IN (0, 6)` -- confirmed live, Snowflake's DAYOFWEEK is
+-- 0=Sunday...6=Saturday, not ISO). This is a genuinely clean fix for BOTH asks at once, not
+-- two separate changes: `rolling_avg_7d`'s window (`ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`)
+-- counts ROWS, not calendar days -- once weekend rows no longer exist in the result set at
+-- all, that same window automatically becomes a 7-BUSINESS-day average with no change to the
+-- window function itself. `{{ LookbackDays.value }}` still means calendar days back (the
+-- window boundary, unchanged) -- weekends inside that window are dropped from what's shown,
+-- not backfilled with extra weekdays to compensate, so a "30 day" lookback now surfaces
+-- ~21-22 bars, not 30.
 
 WITH date_spine AS (
-    SELECT DATEADD(day, SEQ4(), DATEADD(day, -{{ LookbackDays.value }}, CURRENT_DATE())) AS day
-    FROM TABLE(GENERATOR(ROWCOUNT => {{ LookbackDays.value }} + 1))
+    SELECT day FROM (
+        SELECT DATEADD(day, SEQ4(), DATEADD(day, -{{ LookbackDays.value }}, CURRENT_DATE())) AS day
+        FROM TABLE(GENERATOR(ROWCOUNT => {{ LookbackDays.value }} + 1))
+    )
+    WHERE DAYOFWEEK(day) NOT IN (0, 6)
 ),
 pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
