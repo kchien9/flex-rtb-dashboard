@@ -29,6 +29,33 @@ introduces a dimension filter.
   `insights_net_units_bridge.sql` Parts A/C — all already scan every entity within their
   dimension without requiring a filter; run unfiltered here and pool the results
 - A new same-month SDR-activity/pipeline co-movement check (see below)
+- A new forecast-decline driver-candidate check (see "Forecast decline drivers" below) —
+  Kevin: "layer in pipeline/activities... in the top box it can be like forecasting less units
+  next month, could be attributed to less SDR pipeline, or AE execution."
+
+### Forecast decline drivers (new fact block, feeds Box 1 conditionally)
+
+**Trigger**: `insights_forward_pipeline_trend.sql` Part C already flags a real forecast
+decline for a target month — reuse that flag as-is, no changes to its already-validated
+as-of-cohort logic (the technique that avoids comparing a still-growing forecast against a
+settled actual, which would mechanically read as "declining" every month).
+
+**When a decline fires, check for candidate drivers in the SAME window** — never a lagged
+claim, same rule as the SDR framing below:
+- **SDR-sourced pipeline**: did New Logo pipeline creation from `sdr_funnel_by_segment.sql`/
+  `sdr_activity_to_pipeline.sql` also drop this period?
+- **AE execution basket** — 3 already-built proxies, checked independently, report whichever
+  actually moved unfavorably (not a single forced metric):
+  - Win rate (`closed_lost_rate_cube.sql`)
+  - Cycle time (`insights_cycle_time_trend.sql`)
+  - Stage velocity (`insights_stage_velocity.sql`)
+
+**Output**: zero, one, or several candidate drivers per decline — list whichever genuinely
+co-moved, in "coincided with" language ("alongside a drop in SDR-sourced pipeline" / "alongside
+a longer average sales cycle"), never "caused by." **If nothing in the basket moved
+unfavorably, say so plainly** ("no clear driver identified this period") — don't force an
+explanation onto an unexplained decline, same "no fabricated wins/explanations" rule as
+everywhere else in this repo.
 
 **Narration**: pick the 3-5 most material facts across the whole pooled set — not everything,
 not a dump. "Material" = same materiality floors each source file already enforces (this box
@@ -99,6 +126,10 @@ what turns that single number into a per-entity narrative.
    as a comma-separated string the SQL can split. Touches `rolled_out_units_cube.sql`,
    `niro_units_cube.sql`, `closed_lost_rate_cube.sql`, the new `pipeline_cube.sql`, and any
    other file wired to Box 2.
+6a. **`insights_forecast_decline_drivers.sql` (new)** — implements the Forecast Decline
+   Drivers block above. Joins `insights_forward_pipeline_trend.sql` Part C's decline flag
+   against the SDR-pipeline and AE-execution-basket checks for the same window. Facts only —
+   returns the flag plus whichever candidate metrics moved, narration decides how to phrase it.
 6. **Same-month SDR/pipeline co-movement fact (new, small)** — reuses
    `sdr_activity_to_pipeline.sql`'s already-validated same-month correlation finding
    (MM/Ent r=0.63) and `sdr_funnel_by_segment.sql`'s activity+pipeline_created columns.
