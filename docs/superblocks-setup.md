@@ -869,13 +869,43 @@ were inbound so that means 26 were outbound? can you make that more clear." Conf
 added `meetings_held_outbound` (= held − inbound) explicitly to both `sdr_activity_by_rep.sql`
 and `sdr_funnel_by_segment.sql` — don't make the reader subtract it themselves.
 
-**Lead response time showing "0m, avg 47m"** — diagnosed as a Superblocks unit-label bug, not
-a data bug. `sdr_lead_response.sql` only ever computes `lead_response_time_days` — there's no
-minutes-level value anywhere in that file. Most likely: the tile shows
-`median_lead_response_time_days` (genuinely can be low — real skew already validated for this
-metric, e.g. MM/Ent Feb: median 9 days vs. avg 165) as the headline and
-`avg_lead_response_time_days` as the caption, both mislabeled "m" instead of "d". **Fix is in
-Superblocks, not SQL** — check that tile's unit label.
+**"Lead Response Time" tile — RETIRED 2026-08-05, don't rebuild it.** History: first spotted
+showing "0m, avg 47m" — diagnosed at the time as a unit-label bug only (`sdr_lead_response.sql`
+never computes a minutes-level value, so "m" was just the wrong label on a days value). The
+label got fixed to "0d" — but the tile kept showing a literal 0, and re-validating the query
+live confirmed NO row in the real data is ever 0 (SMB Aug 2026: avg 26.7d, median 11.5d;
+MM/Ent Aug: avg 3.0d) — so the original diagnosis was incomplete; the VALUE itself was wrong
+too, a Superblocks binding issue on top of the label issue (tile bound to something that falls
+back to 0 rather than to the real `avg`/`median_lead_response_time_days` for the latest month).
+
+Rather than keep fixing the wiring, checked with Kevin whether the metric is worth keeping at
+all, and the answer is no — retiring it, not just re-fixing it:
+- **What Kevin actually wants (speed-to-lead — how fast an SDR responds after a lead arrives)
+  is NOT buildable from this warehouse, full stop.** Checked live: no Lead object exists
+  anywhere, including the raw Polytomic Salesforce mirror (confirmed — searched both `FLEX` and
+  `EXTERNAL_DATA.POLYTOMIC` for any `%LEAD%` table, zero real hits). Also checked whether
+  account CREATED_AT could stand in for "lead arrived" — it can't: account creation and first
+  SDR touch happen the same day, almost always within hours, for the accounts checked (20 of 20
+  sampled). The account record itself gets created around when the SDR starts prospecting it,
+  not at some earlier "lead arrival" moment — there is no timestamp in this data that's
+  independent of the SDR's own action.
+- **What `sdr_lead_response.sql` actually measures** (first SDR touch → New Logo opp created)
+  is a real, different metric — "time to qualify," not response time — but it's too noisy to be
+  leadership-useful at this grain: real skew already validated (MM/Ent Feb 2026: avg 165 days
+  vs. median 9 — one outlier account dragging the average), and segment-months regularly have
+  single-digit opportunity counts (Strategic: as few as 1), so month-to-month swings are mostly
+  sampling noise, not signal.
+- Everything this tile was trying to tell Sham is already better covered by `touches_per_lead`
+  (stable, real — 13.3 as of Aug 2026), meetings booked/held, and call volume — all on the same
+  page, all cleaner reads on SDR effectiveness.
+
+**Action**: remove the "Lead Response Time" stat tile from the SDR funnel section in
+Superblocks. Keep the "Touches / Lead" tile (`avg_touches_per_lead` from the same query — that
+one's real and useful, unaffected by this). No SQL change needed — `sdr_lead_response.sql`
+still computes `lead_response_time_days` internally (harmless, still feeds touches_per_lead in
+the same row), it's just no longer surfaced as its own tile. Don't re-attempt a true
+speed-to-lead metric without a new data source (e.g. a marketing/form-fill timestamp, or an
+Outreach sequence-enrollment timestamp) — that's a new integration, not a SQL fix.
 
 **"How do we know if their activities went up or down since last month"** — added
 `activity_total_last_month` and `meetings_held_last_month` to `sdr_activity_by_rep.sql` via
