@@ -152,14 +152,29 @@ combined AS (
 ),
 filtered AS (
     SELECT c.*,
-        COALESCE(
-            CASE {{ Dimension.value }}
-                WHEN 'segment_bucket' THEN c.segment_bucket
-                WHEN 'team_bucket' THEN c.team_bucket
-                WHEN 'msp' THEN c.msp
-                WHEN 'rep' THEN c.rep
-            END, 'Not Set') AS entity
+        COALESCE({{ Dimension.value }}, 'Not Set') AS entity
     FROM combined c
+    -- CASE-DISPATCH BUG CAUGHT LIVE 2026-08-05 (predates and is more severe than the population-
+    -- consistency bug documented below) -- {{ Dimension.value }} renders as a BARE, UNQUOTED
+    -- column identifier in this repo's convention (confirmed by every sibling cube --
+    -- niro_units_cube.sql/rolled_out_units_cube.sql/closed_lost_rate_cube.sql all write
+    -- `COALESCE({{ Dimension.value }}, 'Not Set')` directly, no CASE wrapper -- and by this
+    -- file's own grace-period filter below, which correctly wraps it in literal quotes
+    -- `'{{ Dimension.value }}' = 'rep'` specifically BECAUSE the raw substitution has no quotes
+    -- of its own). The original draft instead wrote `CASE {{ Dimension.value }} WHEN
+    -- 'segment_bucket' THEN c.segment_bucket ...`, which renders as e.g. `CASE rep WHEN
+    -- 'segment_bucket' THEN ...` -- testing each row's rep NAME against the literal string
+    -- 'segment_bucket', which can never match. Confirmed live: every Dimension value (segment_
+    -- bucket/team_bucket/msp/rep) returned a single `entity = 'Not Set'` bucket for 100% of rows
+    -- -- the CASE always fell through to the implicit ELSE (NULL), COALESCE'd to 'Not Set'. This
+    -- silently passed both rounds of live validation so far because every check run compared
+    -- SUM(units) totals across dimensions, which stay correct regardless of whether `entity` is
+    -- labeled right -- the rows were still being grouped on the SAME real underlying columns via
+    -- GROUP BY entity, just all lumped under one wrong label instead of split apart. Fixed: bare
+    -- substitution, identical to every sibling cube -- `{{ Dimension.value }}` resolves directly
+    -- to whichever real column (segment_bucket/team_bucket/msp/rep) Superblocks binds, no CASE/
+    -- dispatch layer needed since those columns already exist under their real names on `c.*`.
+    --
     -- POPULATION-CONSISTENCY BUG CAUGHT LIVE 2026-08-05 -- the original draft gated the whole
     -- query on `entity IS NOT NULL` (below, in `periods`), meaning the in-scope POPULATION
     -- silently changed depending on which {{ Dimension.value }} was selected: rows from
