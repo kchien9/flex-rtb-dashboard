@@ -737,6 +737,66 @@ stacked bar and inbound/outbound share below, stat tiles (touches/lead, lead-res
 meetings-held-rate) with the sparkline+badge pattern already locked in for the MSP tab
 (§4.14), SDR-level table as a drill-through at the bottom.
 
+## 4.17. Forward Pipeline in Debrief + repo-wide fixes (written down 2026-08-05)
+
+Kevin, reviewing the Pipeline tab: three quick fixes, then the bigger ask. **New Vertical
+excluded repo-wide** — "should not be included anywhere in the dashboard," it has its own
+separate comp plan (`NEW_VERTICALS_PAYOUT`). Audited all 26 files referencing
+`OPPORTUNITY_TYPE`; most were already safe (scoped to New Logo/Expansion/Move In). 6 files
+only had an *optional* DealType filter (unfiltered by default, letting New Vertical through):
+`open_opportunities_by_segment.sql`, `open_opportunities_by_msp.sql`,
+`open_opportunities_drilldown.sql`, `new_opportunities_by_msp.sql`, `opportunity_drilldown.sql`,
+`pipeline_forecast.sql` — all got a hard exclusion added. **A "2926-07" row on the Road Ahead
+table** was confirmed live to be real Salesforce data — a genuine year typo on one line item
+(1 unit) — not a query bug; `pipeline_forecast.sql`'s own `LookaheadMonths` bound already
+excludes it mathematically, so if it showed up live the widget wasn't actually bound to that
+validated query (same unverified-widget pattern as the Funnel Diagnosis incident, §4.5) — added
+an absolute 5-year sanity ceiling as a defensive backstop regardless. **"Click to drill" doing
+nothing** on the Open Opportunities by Segment chart — `open_opportunities_drilldown.sql`
+already has the `{{ Segment.value }}` filter it needs; this is a pure Superblocks click-event
+binding gap, not a query problem.
+
+**The bigger ask**: "i want forward pipeline to be part of our ai callout debrief. if units
+are forecasting lower next month we need to call it out... identify reasons why, like
+strategic segment was driver w 50% less units MoM."
+
+**The methodological catch, resolved with Kevin before building**: a forecast for a future
+month mechanically GROWS every day as more deals close into it (matches
+`pipeline_forecast.sql`'s own validated concentration-in-the-very-next-month finding).
+Comparing that still-forming number against a fully-settled past actual would read as "lower"
+almost every month by construction, not because pipeline is really shrinking. Confirmed the
+fix directly with Kevin: track the SAME target month's own forecast over time instead — what
+did we expect for October a month ago vs. today.
+
+**New file `queries/insights_forward_pipeline_trend.sql`** — since `pipeline_forecast.sql`
+never snapshotted its own output, "as of N days ago" is a cohort reconstruction using real
+historical timestamps (`CREATED_AT_UTC`/`CLOSED_AT_UTC`), not a literal replay. Honest
+limitation stated in the file: it uses each opportunity's CURRENT `ANTICIPATED_GO_LIVE_AT_UTC`
+value, not a true historical snapshot of what that field said N days ago — a real, useful
+approximation, not a perfect point-in-time replay.
+
+**A real bug caught and fixed while validating**: the first draft filtered `WHERE NOT
+o.IS_CLOSED` as a blanket population filter — meaning any deal open N days ago that has SINCE
+closed (won or lost) was silently excluded from the ENTIRE query, not just today's slice
+(confirmed live, 112 real deals fit this pattern in a 3-month window). This meant the query
+could mathematically only ever show growth, never decline — the exact signal the whole feature
+exists to catch. Fixed: "currently open" only applies inside the as-of-today aggregate; as-of-
+N-days-ago uses the purely historical existed-and-was-open condition regardless of what
+happened since. `deals_since_closed_lost` names the real-loss component explicitly.
+
+**Part C's decline flag is built on Part B (open pipeline), not Part A (closed-awaiting-
+rollout)** — a deliberate reversal of pipeline_forecast.sql's own confidence framing, worth
+remembering: Part A can only ever grow (an `IS_CLOSED_WON` deal never un-closes), so a real
+decline can only appear on the leg where deals can leave a cohort. The narration must state
+this confidence caveat explicitly — "next month's open pipeline has weakened" carries real
+uncertainty (unweighted face value), not "we're going to miss the number."
+
+**Wiring**: `insights_forward_pipeline_trend.sql` Part C feeds the Debrief narration prompt as
+a separate query, same as the streak scanners (§4.12) — not merged into `ai_summary_facts.sql`.
+When Part C returns a row for a target month, that IS the flag (pre-computed `company_pct_
+change` and `driver_segment`, so the LLM never does the subtraction itself); when it returns
+no rows, there's nothing to call out for that month.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
