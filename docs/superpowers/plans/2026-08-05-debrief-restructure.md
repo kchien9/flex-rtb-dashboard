@@ -27,6 +27,31 @@ invariant stated in that step (not a fixed expected number — the real data cha
 so every check below is written as a structural/reconciliation invariant, e.g. "breakout totals
 sum back to the unbroken-out total," not "returns exactly 47,933").
 
+**Dual time comparison naming convention (added after Task 4's code review flagged drift
+risk)** — Tasks 1-4 established this pattern, READ BEFORE NAMING ANY NEW COMPARISON COLUMN IN
+TASKS 5-8:
+- Always name the prior-period column `<metric>_prior_period` (a LAG).
+- Always name the trailing-average column `<metric>_trailing_avg_6mo` if the file is
+  month-only granularity (matches `rolled_out_units_cube.sql`), or `<metric>_trailing_avg_
+  6period` if the file supports Month OR Quarter granularity via `{{ Granularity.value }}`
+  (matches `niro_units_cube.sql`/`closed_lost_rate_cube.sql`/`pipeline_cube.sql`) — `_6period`
+  is granularity-blind (6 preceding rows regardless of whether a row is a month or a quarter,
+  same as the pre-existing single-period columns these files already had before this plan) —
+  don't invent a granularity-scaled window unless a task explicitly asks for one.
+- Compute the comparison on the SAME expression the file's headline metric already uses (a
+  rate stays a rate — `LAG(DIV0(...))`, never on raw counts as a substitute; a unit total
+  stays a unit total) — never mix a rate and a count between the base column and its
+  comparison columns.
+- If a file has no existing pre-materialized aggregate to reference (most of these cubes
+  don't — window functions can't reference a sibling SELECT-list alias), repeat the full
+  aggregate expression inside `LAG(...)`/`AVG(...) OVER (...)` rather than restructuring the
+  file into a two-stage CTE — this matches every cube built so far and keeps the diff minimal;
+  don't refactor architecture that wasn't asked for.
+- If genuinely uncertain which metric to extend (a file trend-tracks more than one column, or
+  none), pick the single column the file already trend-tracks with its own pre-existing window
+  function if one exists; otherwise pick the most central/headline metric for that file's
+  Subject and document the reasoning inline, the same way Tasks 2-4 did.
+
 ---
 
 ## File Structure
