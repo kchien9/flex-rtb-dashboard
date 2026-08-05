@@ -9,7 +9,7 @@
 -- parameterized like the filters below. Never let it be free text.
 -- NOTE: segment_bucket replaced HUBSPOT_COMPANY_SEGMENT, and team_bucket replaced
 -- HUBSPOT_STATIC_TEAM_NAME_DEAL, both 2026-07-28 -- the raw fields are known-unreliable/dirty
--- (see README's data quality gotchas); segment_bucket and team_bucket are the validated
+-- (see README's data quality gotchas) -- segment_bucket and team_bucket are the validated
 -- mappings defined below.
 --
 -- FILTER ESCAPING -- READ BEFORE WIRING: real team names contain apostrophes
@@ -46,7 +46,7 @@
 -- SEGMENT BUCKET (added 2026-07-28, confirmed with Kevin) -- Sham wants the primary grouping
 -- to be by SEGMENT (Strategic / MM+Ent / SMB / House Accounts), not raw pod name. Real pod
 -- names don't map 1:1 onto that -- some pod labels are STALE (Cory's Team: Cory used to
--- manage a pod, he's now an individual contributor on Strategic Team; Heidi's Team: Heidi has
+-- manage a pod, he's now an individual contributor on Strategic Team -- Heidi's Team: Heidi has
 -- left the company, Dana Finch runs that pod now -- also resolves oneonone_prep.sql's
 -- previously-unconfirmed Dana pod mapping) -- so this is a name-to-segment mapping, not a
 -- literal rename. Confirmed mapping (validated live against 3 months of real unit volume):
@@ -65,7 +65,7 @@
 -- entirely from this query's output (per Kevin: "we dont want dsmb or partner success...we
 -- do want sdrs but i think we can remove them for now too"). This is a different exclusion
 -- than the DSMB account-size filter above -- that one drops small ACCOUNTS regardless of who
--- owns them; this one drops specific ORG PODS from the segment-level view regardless of
+-- owns them -- this one drops specific ORG PODS from the segment-level view regardless of
 -- account size. Both apply, independently.
 --
 -- TEAM BUCKET (added 2026-07-28) -- a SECOND, NARROWER mapping than segment_bucket, for the
@@ -73,7 +73,7 @@
 -- Sebastian, Dana -- "all we want are Brandons team, rory's team, seba, and dana" (Hans is
 -- SDR-side, not in this units-side query at all). Different from segment_bucket in two ways:
 -- (1) SMB splits into Rory's Team / Sebastian's Team here instead of collapsing to one "SMB"
--- bucket, since Team needs to distinguish the two managers; (2) House Accounts and Not Set
+-- bucket, since Team needs to distinguish the two managers -- (2) House Accounts and Not Set
 -- are NOT valid Team values (no direct-report manager owns them) even though they ARE valid
 -- Segment values -- segment_bucket and team_bucket are independent, don't expect them to
 -- agree row for row. Confirmed live volume: Dana's Team 12.78M units/3mo (includes the
@@ -88,7 +88,7 @@
 -- static HubSpot snapshot with no employment-status concept at all, so she shows up as if
 -- current. This was also the entire "extra team" row Kevin spotted under SMB in the Rolled-Out
 -- drill that Closed Won didn't show (that card's team_bucket mapping already excludes the
--- unnumbered pod from team-level; this one didn't have an equivalent guard on the rep itself).
+-- unnumbered pod from team-level -- this one didn't have an equivalent guard on the rep itself).
 -- Fix: join deal_owner_status (same deduped-STG_SALESFORCE__USER + {{ GraceMonths.value }}
 -- grace-period pattern as rep_leaderboard.sql) and drop any row whose HUBSPOT_DEAL_OWNER is
 -- departed beyond the grace window -- same rule already applied and Kevin-approved elsewhere
@@ -158,7 +158,7 @@ SELECT
     -- a trailing average alongside whatever period Sham is inspecting. Applied to
     -- new_integrated_units specifically (the same metric this file already trend-tracks via
     -- new_integrated_units_rolling_avg_3mo just above), not a new metric -- month grain per the
-    -- spec leads with prior-period as primary, trailing average as secondary; unlike the 3mo avg
+    -- spec leads with prior-period as primary, trailing average as secondary -- unlike the 3mo avg
     -- above, this trailing average EXCLUDES the current row (6 PRECEDING AND 1 PRECEDING) so it
     -- can serve as an independent comparison baseline rather than double-counting the row it's
     -- being compared against.
