@@ -86,6 +86,23 @@ SELECT
     o.OPPORTUNITY_TYPE                                    AS deal_type,
     o.FLEX_UNIT_COUNT                                     AS units,
     DATEDIFF(day, o.CREATED_AT_UTC, CURRENT_DATE())       AS days_open,
+    -- Added 2026-08-05, Kevin: "is days right now the total days the opp has been open?" --
+    -- yes, days_open is since CREATED_AT_UTC, total age, not activity. This is the real
+    -- last-human-touch signal (same MAX(completed Task/Meeting) definition already used in
+    -- this file's own recency WHERE filter, and the same fix README documents for
+    -- UPDATED_AT_UTC not being trustworthy) -- falls back to CREATED_AT_UTC when an
+    -- opportunity has never had a single logged activity, so a never-touched deal reads as
+    -- "as old as it is," not NULL.
+    -- Validated live against the exact deals Kevin was looking at: RPM Living Move In is
+    -- days_open=285 but days_since_last_touch=1 -- old but actively worked, not stalled. MAA
+    -- New Logo is the more useful catch: days_open=51 but days_since_last_touch=57 -- a
+    -- last-touch OLDER than the deal's own age. Not a bug: `la` joins on CRM_ACCOUNT_SK (the
+    -- same grain the recency WHERE filter already uses), so it can reflect real activity that
+    -- happened on the ACCOUNT before this specific opportunity record was created -- a deal
+    -- can look "only 51 days old" by creation date while the account itself has been quiet
+    -- much longer. That's a real, useful signal here (this MAA deal reads as routine by age
+    -- alone but is actually stalling), not something to clamp to days_open.
+    DATEDIFF(day, COALESCE(la.last_activity_date, o.CREATED_AT_UTC), CURRENT_DATE()) AS days_since_last_touch,
     sfo.OPPORTUNITY_NOTES__C                              AS opportunity_notes,
     sfo.NEXTSTEP                                          AS next_step,
     sfo.NEXT_STEP_DATE__C                                 AS next_step_date,
