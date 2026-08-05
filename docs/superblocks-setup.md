@@ -408,6 +408,17 @@ the unit/mix trend to that team), it does not change which tiers appear. **Deal 
 layered on top — Unit Type only applies to rolled-out-units facts, Deal Type only to
 deal-grain facts. **Time horizon** (This Week/Month/Quarter) is always active.
 
+**Duplicate Time Horizon control removed, 2026-08-05** — Kevin spotted "This Week/Month/
+Quarter" appearing twice: once in the global top bar (alongside All Teams/All Segments/etc.),
+once again inside the Debrief tab. Confirmed both were bound to the SAME variable — pure
+visual duplication, not a tab-local override. Removed the Debrief-local copy; the global
+top-bar toggle is the single source of truth for time horizon across every tab. Don't re-add a
+tab-local one unless it's deliberately meant to diverge from the global setting (and if so,
+label it something other than the identical "This Week/Month/Quarter" text so it doesn't read
+as a duplicate again). **Not the same control as Monthly/Quarterly** (Granularity, just above
+this) — that one is real and stays: it sets trend-bucket size, Time Horizon sets which single
+current period the snapshot is about.
+
 **Prompt-layer fix, the direct cause of the flat-list bug**: wire Macro Trends and
 Individual Drivers as two visually separate blocks with two separate headers (or two
 separate LLM calls, whichever is cleaner in Superblocks) — never one prompt call that
