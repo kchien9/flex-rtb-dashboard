@@ -16,6 +16,24 @@
 -- Same sdr_segment pod mapping, same booked/held (MEETING_STATUS, no second join needed for
 -- that part), same inbound join (SALESFORCE_EVENT.INBOUND_MEETING__C via MEETING_ID = ID) as
 -- sdr_funnel_by_segment.sql. Same departure grace period.
+--
+-- OUTBOUND ADDED EXPLICITLY (2026-08-05) -- Kevin, looking at a held=40/inbound=14 row: "does
+-- that mean 26 were outbound? can you make that more clear." Yes -- `meetings_held_inbound`
+-- is a subset of `meetings_held` specifically (not of booked, not of total activity).
+-- `meetings_held_outbound` makes the complement explicit instead of making the reader do the
+-- subtraction themselves, same "don't make the reader/LLM do arithmetic" principle used
+-- throughout this repo.
+--
+-- MONTH-OVER-MONTH TREND ADDED (2026-08-05) -- Kevin: "how do we know if their activities went
+-- up or down since last month." This table is one row per (month, rep) already -- what was
+-- missing is a per-rep PRIOR-month comparison exposed as columns, so Superblocks can render
+-- the exact same plain-MoM trend badge already locked in for the MSP tab (§4.14: plain
+-- (this-last)/last, NOT a multi-month rolling average -- that was tried and rejected there for
+-- being unintuitive). `activity_total_last_month`/`activity_total_pct_change` and
+-- `meetings_held_last_month`/`meetings_held_pct_change` via LAG, PARTITION BY rep. Left NULL
+-- (not 0) when a rep has no prior-month row at all -- distinct from a real 0-activity month --
+-- so Superblocks can apply the same New/Stopped blank-handling rule from §4.14 rather than a
+-- misleading infinite/undefined percent.
 
 WITH emp_dedup AS (
     SELECT EMPLOYEE_SK, EMAIL
@@ -61,21 +79,38 @@ meetings AS (
     LEFT JOIN EXTERNAL_DATA.POLYTOMIC.SALESFORCE_EVENT se ON m.MEETING_ID = se.ID
     WHERE m.CREATED_AT_UTC >= DATEADD(month, -{{ LookbackMonths.value }}, DATE_TRUNC('month', CURRENT_DATE()))
     GROUP BY 1, 2, 3
+),
+combined AS (
+    SELECT
+        COALESCE(a.mo, mt.mo)                              AS month,
+        COALESCE(a.rep, mt.rep)                             AS rep,
+        COALESCE(a.sdr_segment, mt.sdr_segment)             AS segment,
+        COALESCE(a.calls, 0)                                AS calls,
+        COALESCE(a.emails, 0)                               AS emails,
+        COALESCE(a.calls, 0) + COALESCE(a.emails, 0)        AS activity_total,
+        COALESCE(mt.meetings_booked, 0)                     AS meetings_booked,
+        COALESCE(mt.meetings_held, 0)                       AS meetings_held,
+        DIV0(COALESCE(mt.meetings_held, 0), COALESCE(mt.meetings_booked, 0)) AS meetings_held_rate,
+        COALESCE(mt.meetings_held_inbound, 0)               AS meetings_held_inbound,
+        COALESCE(mt.meetings_held, 0) - COALESCE(mt.meetings_held_inbound, 0) AS meetings_held_outbound,
+        DIV0(COALESCE(mt.meetings_held_inbound, 0), COALESCE(mt.meetings_held, 0)) AS inbound_share_of_held
+    FROM activity a
+    FULL OUTER JOIN meetings mt ON a.mo = mt.mo AND a.rep = mt.rep
+    WHERE COALESCE(a.sdr_segment, mt.sdr_segment) IS NOT NULL
+      {{#Segment.value}} AND COALESCE(a.sdr_segment, mt.sdr_segment) = '{{Segment.value}}' {{/Segment.value}}
 )
 SELECT
-    COALESCE(a.mo, mt.mo)                              AS month,
-    COALESCE(a.rep, mt.rep)                             AS rep,
-    COALESCE(a.sdr_segment, mt.sdr_segment)             AS segment,
-    COALESCE(a.calls, 0)                                AS calls,
-    COALESCE(a.emails, 0)                               AS emails,
-    COALESCE(a.calls, 0) + COALESCE(a.emails, 0)        AS activity_total,
-    COALESCE(mt.meetings_booked, 0)                     AS meetings_booked,
-    COALESCE(mt.meetings_held, 0)                       AS meetings_held,
-    DIV0(COALESCE(mt.meetings_held, 0), COALESCE(mt.meetings_booked, 0)) AS meetings_held_rate,
-    COALESCE(mt.meetings_held_inbound, 0)               AS meetings_held_inbound,
-    DIV0(COALESCE(mt.meetings_held_inbound, 0), COALESCE(mt.meetings_held, 0)) AS inbound_share_of_held
-FROM activity a
-FULL OUTER JOIN meetings mt ON a.mo = mt.mo AND a.rep = mt.rep
-WHERE COALESCE(a.sdr_segment, mt.sdr_segment) IS NOT NULL
-  {{#Segment.value}} AND COALESCE(a.sdr_segment, mt.sdr_segment) = '{{Segment.value}}' {{/Segment.value}}
+    *,
+    LAG(activity_total) OVER (PARTITION BY rep ORDER BY month)             AS activity_total_last_month,
+    LAG(meetings_held) OVER (PARTITION BY rep ORDER BY month)              AS meetings_held_last_month
+    -- DELIBERATELY NO PRE-COMPUTED PCT_CHANGE COLUMN -- a plain DIV0(current - last, last)
+    -- would show 0% (not "New") the moment a rep goes from a real 0-activity prior month to
+    -- any real number this month, since DIV0 special-cases a zero denominator to 0 -- the
+    -- exact opposite of what happened, and the exact "New"/"Stopped" edge case §4.14 already
+    -- solved correctly for the MSP tab (prior blank/0 + current has volume -> "New" -- prior has
+    -- volume + current blank/0 -> "Stopped"/-100% -- both blank/0 -> no badge -- else plain %).
+    -- Expose the two raw columns above and apply that SAME 4-case formula in Superblocks --
+    -- don't compute a percent here that would silently mislead on exactly the months this
+    -- badge is supposed to flag most clearly.
+FROM combined
 ORDER BY segment, rep, month;
