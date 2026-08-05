@@ -49,6 +49,8 @@ LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.I
 LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
 WHERE NOT o.IS_CLOSED
   AND o.OPPORTUNITY_ID LIKE '006%'
+  -- New Vertical excluded repo-wide per Kevin 2026-08-05, see open_opportunities_by_segment.sql
+  AND o.OPPORTUNITY_TYPE != 'New Vertical'
   AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
   AND CASE
         WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'

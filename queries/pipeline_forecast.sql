@@ -28,6 +28,23 @@
 -- looking "Road Ahead" numbers, exactly the kind of total a DSMB account could quietly inflate.
 -- Same Pattern B pmc_size join as performance_cube.sql (via DIM_CRM_ACCOUNT_HISTORY.PMC_ID),
 -- applied to all three underlying queries below (Part A, and both of Part B's subqueries).
+--
+-- NEW VERTICAL EXCLUDED (added 2026-08-05) -- per Kevin: "new verticals should not be
+-- included anywhere in the dashboard" -- it has its own separate comp plan/tracking
+-- (NEW_VERTICALS_PAYOUT), not part of this dashboard's core sales motion. Applied to all
+-- three underlying queries below.
+--
+-- GARBAGE FAR-FUTURE DATE CAUGHT LIVE 2026-08-05 -- Kevin spotted a "2926-07" row on the Road
+-- Ahead table. Confirmed live: real Salesforce data, a genuine typo on one line item
+-- (ROLLOUT_MONTH = 2926-07-01, 1 unit -- someone fat-fingered the year, 2026 became 2926) --
+-- not a query bug. This file's own {{ LookaheadMonths.value }} upper bound already excludes
+-- it mathematically (2926 is nowhere close to a few months out) -- if it's still showing up
+-- live, the widget isn't actually bound to this validated query/parameter, same "unverified
+-- live widget" pattern as the Funnel Diagnosis incident (§4.5) -- check that binding first.
+-- Added a second, absolute sanity ceiling anyway (`CURRENT_DATE() + 5 years`) as a defensive
+-- backstop so a future fat-fingered year can never leak through even if LookaheadMonths is
+-- ever misconfigured or left unbound -- cheap insurance, doesn't change any real near-term
+-- number.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -54,8 +71,10 @@ LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY e ON o.OWNER_SK = e.EMPLOYEE_SK AND e.I
 LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
 LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
 WHERE NOT o.IS_CLOSED
+  AND o.OPPORTUNITY_TYPE != 'New Vertical'
   AND o.ANTICIPATED_GO_LIVE_AT_UTC >= CURRENT_DATE()
   AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+  AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(year, 5, CURRENT_DATE())
   AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   {{#Team.value}} AND COALESCE(
         CASE
@@ -112,8 +131,10 @@ FROM (
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE o.IS_CLOSED_WON
+      AND o.OPPORTUNITY_TYPE != 'New Vertical'
       AND li.ROLLOUT_MONTH > CURRENT_DATE()
       AND li.ROLLOUT_MONTH <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+      AND li.ROLLOUT_MONTH <= DATEADD(year, 5, CURRENT_DATE())
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
     GROUP BY 1
 ) c
@@ -124,8 +145,10 @@ FULL OUTER JOIN (
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
     WHERE NOT o.IS_CLOSED
+      AND o.OPPORTUNITY_TYPE != 'New Vertical'
       AND o.ANTICIPATED_GO_LIVE_AT_UTC > CURRENT_DATE()
       AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(month, {{ LookaheadMonths.value }}, CURRENT_DATE())
+      AND o.ANTICIPATED_GO_LIVE_AT_UTC <= DATEADD(year, 5, CURRENT_DATE())
       AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
     GROUP BY 1
 ) p ON c.expected_month = p.expected_month

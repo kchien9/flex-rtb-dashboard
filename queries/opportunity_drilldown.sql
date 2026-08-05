@@ -86,6 +86,8 @@ FROM FLEX.SALES.FCT_CRM_OPPORTUNITY_LINE_ITEM li
 JOIN team_map m ON li.OWNER_SK = m.EMPLOYEE_SK
 LEFT JOIN FLEX.SALES.FCT_CRM_OPPORTUNITY o ON li.OPPORTUNITY_ID = o.OPPORTUNITY_ID
 WHERE li.ROLLOUT_MONTH >= DATEADD(month, -{{ LookbackMonths.value }}, (SELECT MAX(BP_MONTH) FROM PRODUCTION.ANALYTICS.PROPERTY_BP_MONTH_STATS))
+  -- New Vertical excluded repo-wide per Kevin 2026-08-05, see open_opportunities_by_segment.sql
+  AND (o.OPPORTUNITY_TYPE IS NULL OR o.OPPORTUNITY_TYPE != 'New Vertical')
   {{#Rep.value}}       AND m.FULL_NAME = '{{Rep.value}}'         {{/Rep.value}}
   {{#Team.value}}      AND m.team_bucket = '{{Team.value}}' {{/Team.value}}
   {{#BpMonth.value}}   AND li.ROLLOUT_MONTH = '{{BpMonth.value}}' {{/BpMonth.value}}

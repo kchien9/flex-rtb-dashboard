@@ -125,6 +125,8 @@ LEFT JOIN EXTERNAL_DATA.POLYTOMIC.SALESFORCE_OPPORTUNITY sfo ON o.OPPORTUNITY_ID
 LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
 WHERE NOT o.IS_CLOSED
   AND o.OPPORTUNITY_ID LIKE '006%'
+  -- New Vertical excluded repo-wide per Kevin 2026-08-05, see open_opportunities_by_segment.sql
+  AND o.OPPORTUNITY_TYPE != 'New Vertical'
   AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
   AND CASE
         WHEN e.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'

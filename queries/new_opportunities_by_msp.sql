@@ -51,6 +51,8 @@ LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.I
 LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
 LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
 WHERE o.OPPORTUNITY_ID LIKE '006%'
+  -- New Vertical excluded repo-wide per Kevin 2026-08-05, see open_opportunities_by_segment.sql
+  AND o.OPPORTUNITY_TYPE != 'New Vertical'
   AND o.CREATED_AT_UTC >= DATEADD(month, -{{ NewOppsMonths.value }}, CURRENT_DATE())
   AND (ps.pmc_current_units IS NULL OR ps.pmc_current_units > 750)
   AND CASE
