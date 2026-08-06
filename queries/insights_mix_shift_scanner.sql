@@ -33,20 +33,30 @@
 -- reason as that file. Week not offered here, same rationale.
 --
 -- MSP/REP CUTS ON PART B, added 2026-08-05 (Debrief restructure, docs/superpowers/specs/2026-
--- 08-05-debrief-restructure-design.md) -- Part B-MSP and Part B-Rep below are structural copies
--- of Part B (Team)/Part B-Segment, same CTE chain and gaps-and-islands streak technique, only
--- the partition key changes: msp resolved via the same account-level DIM_SALES_ACCOUNTS join
--- niro_units_cube.sql already validated (this file had no existing DIM_SALES_ACCOUNTS join to
--- reuse -- checked before adding one), and rep = HUBSPOT_DEAL_OWNER, the same rep-name column every
--- other rep cut in this repo uses directly. Both COALESCE an unresolved value to 'Not Set'
--- rather than dropping the row, so each cut's total_units reconciles EXACTLY against Part
--- B-Segment's total for the same period (RECONCILED LIVE -- see the commit message for this
--- change for the actual numbers). NOT Part B/Team's total -- Team's own HAVING clause already
--- excludes House Accounts and plain 'SMB Account Executives' rows that don't map to a
--- team_bucket, a pre-existing gap this change didn't introduce, so Team's total is always a
--- strict subset of Segment's, never the reconciliation target. Neither offers a DealType.value filter -- see Part B-MSP's
--- header below for why filtering on the exact dimension this scanner measures (expansion_share
--- is a HUBSPOT_DEAL_TYPE split) would be self-defeating. Part C/Part C-Segment (New vs.
+-- 08-05-debrief-restructure-design.md) -- Part B now has ALL 4 breakout cuts: Team (original
+-- Part B), Segment (Part B-Segment), MSP (Part B-MSP), Rep (Part B-Rep). The two new cuts
+-- (MSP, Rep) are structural copies of Part B (Team)/Part B-Segment, same CTE chain and
+-- gaps-and-islands streak technique, only the partition key changes: msp resolved via the same
+-- account-level DIM_SALES_ACCOUNTS join niro_units_cube.sql already validated (this file had no
+-- existing DIM_SALES_ACCOUNTS join to reuse -- checked before adding one), and rep =
+-- HUBSPOT_DEAL_OWNER, the same rep-name column every other rep cut in this repo uses directly.
+-- Both COALESCE an unresolved value to 'Not Set' rather than dropping the row, so each cut's
+-- total_units reconciles EXACTLY against Part B-Segment's total for the same period (RECONCILED
+-- LIVE against BP_MONTH = 2026-08-01: Segment/MSP/Rep all summed to 308,855 total_units /
+-- 209,599 Expansion units for that period). NOT Part B/Team's total -- Team's own HAVING clause
+-- already excludes House Accounts and plain 'SMB Account Executives' rows that don't map to a
+-- team_bucket (Team's total for that same period was 293,276, a pre-existing gap this change
+-- didn't introduce), so Team's total is always a strict subset of Segment's, never the
+-- reconciliation target. Real Not Set rate for that period: MSP 5.82% (17,981 of 308,855
+-- units, a genuine account-MSP coverage gap, not a join failure -- see Part B-MSP's header),
+-- Rep 0% (see Part B-Rep's header) -- both notably lower than Task 5's ~39% deactivation
+-- Not Set rate, as expected for a different population. Neither offers a DealType.value filter
+-- -- see Part B-MSP's header below for why filtering on the exact dimension this scanner
+-- measures (expansion_share is a HUBSPOT_DEAL_TYPE split) would be self-defeating. Only the two
+-- NEW cuts (MSP, Rep) got multi-select filters + dual time comparison in this pass -- Part
+-- B/Part B-Segment (Team/Segment) still have neither, which matches this task's exact scope
+-- (asked only to extend Part B's MSP/Rep cuts), not an oversight -- don't assume all 4 Part B
+-- cuts are equally filterable when wiring Superblocks (Task 9). Part C/Part C-Segment (New vs.
 -- Recaptured) were NOT extended with MSP/Rep cuts here -- out of scope for this task, which
 -- asked only for Part B.
 
@@ -220,9 +230,14 @@ ORDER BY streak_months DESC;
 -- isn't populated for deactivated/non-integrated properties, so it can't be reused here, same
 -- reasoning as every other MSP cut in this repo. Unresolved MSP is COALESCE'd to 'Not Set'
 -- rather than dropped, so this cut's total unit volume reconciles EXACTLY against Part
--- B-Segment's total for the same period (RECONCILED LIVE -- see the commit message for this
--- change for the actual numbers) -- not against Part B/Team's total, which is always a strict
--- subset of Segment's (see the file's top-of-file header for why).
+-- B-Segment's total for the same period -- not against Part B/Team's total, which is always a
+-- strict subset of Segment's (see the file's top-of-file header for why). RECONCILED LIVE
+-- against BP_MONTH = 2026-08-01: Segment/MSP both totaled 308,855 units / 209,599 Expansion
+-- units for that period. Real MSP Not Set rate for that period: 5.82% (17,981 of 308,855
+-- units) -- a genuine account-MSP coverage gap (accounts with no DIM_SALES_ACCOUNTS match, not
+-- a broken join -- the join itself is confirmed 1:1 by the reconciliation above), materially
+-- lower than Task 5's ~39% deactivation Not Set rate since this is a different population
+-- (new-rollout deals, not the deactivation base).
 --
 -- MULTI-SELECT FILTERS + DUAL TIME COMPARISON, added 2026-08-05 (Debrief restructure,
 -- docs/superpowers/specs/2026-08-05-debrief-restructure-design.md) -- Team.value/Segment.value/
@@ -329,7 +344,11 @@ ORDER BY streak_months DESC;
 -- (e.g. shout_outs_facts.sql, insights_net_units_bridge.sql's Part B4). A missing rep is
 -- COALESCE'd to 'Not Set' (same reasoning as MSP above -- keep unresolved volume visible
 -- instead of dropping it, so this cut also reconciles EXACTLY against Part B-Segment's total,
--- not against Part B/Team's, same distinction as Part B-MSP above).
+-- not against Part B/Team's, same distinction as Part B-MSP above). RECONCILED LIVE against
+-- BP_MONTH = 2026-08-01: Rep cut also totaled 308,855 units / 209,599 Expansion units for that
+-- period, matching Segment/MSP exactly. Real Rep Not Set rate for that period: 0% (every
+-- IS_NEW_ROLLOUT row in that month had a populated HUBSPOT_DEAL_OWNER) -- unlike MSP, no
+-- coverage gap observed for this cut in the period checked.
 --
 -- DEPARTED-REP GRACE PERIOD DELIBERATELY NOT APPLIED HERE -- same reasoning as insights_net_
 -- units_bridge.sql's Part B4 header: this Part's expansion_share is built off IS_NEW_ROLLOUT, a
