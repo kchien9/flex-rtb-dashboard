@@ -42,6 +42,16 @@
 -- DIM_EMPLOYEE_HISTORY join -- a deal whose owner is departed beyond the grace window now
 -- shows rep = NULL rather than a name, so the watch list still surfaces the stuck deal (it's
 -- real, still needs someone to close it out) but doesn't claim a departed person is working it.
+--
+-- REAL BUG FOUND AND FIXED 2026-08-06, PART A -- caught while pasting this file's body into
+-- insights_forecast_decline_drivers.sql (Task 8 of the Debrief restructure): Part A's final
+-- SELECT used `QUALIFY entered_q < DATE_TRUNC('quarter', CURRENT_DATE())` to drop the
+-- in-progress quarter, but that clause references no window function at all -- confirmed live,
+-- this raises a hard Snowflake compile error ("found QUALIFY clause but no window function"),
+-- meaning Part A as originally committed could never actually run. Fixed to `HAVING entered_q
+-- < DATE_TRUNC('quarter', CURRENT_DATE())` -- same censoring intent, correct syntax for
+-- filtering on a GROUP BY output column post-aggregation (no window function involved, so this
+-- was never a QUALIFY case to begin with).
 
 -- Part A: within-segment stage velocity trend, resolved transitions only
 WITH segmented AS (
@@ -80,7 +90,7 @@ FROM transitions
 WHERE stage_start IS NOT NULL AND stage_end IS NOT NULL AND segment IS NOT NULL
   {{#Stage.value}} AND stage = '{{Stage.value}}' {{/Stage.value}}
 GROUP BY 1, 2, 3
-QUALIFY entered_q < DATE_TRUNC('quarter', CURRENT_DATE())  -- drop in-progress quarter, same censoring reason as above
+HAVING entered_q < DATE_TRUNC('quarter', CURRENT_DATE())  -- drop in-progress quarter, same censoring reason as above -- HAVING, not QUALIFY, see 2026-08-06 fix note above
 ORDER BY 1, 2, 3;
 
 -- Part B: currently-stuck deals -- open right now, longer in their current stage than

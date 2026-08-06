@@ -16,7 +16,7 @@
 -- NOT A NEW LAG MODEL -- checked that file's header before building this: it already tested
 -- SDR calls vs. New Logo pipeline created at 0-month and 1-month lag, live, very recently
 -- (2026-08-04). Same month wins (MM/Ent r=0.63, SMB r=0.17, Strategic r=-0.45 unreliable/
--- 1-person sample); 1-month lag is weaker or negative in all three segments. Plausible reason
+-- 1-person sample) -- 1-month lag is weaker or negative in all three segments. Plausible reason
 -- already documented there: a qualifying call is often the SAME event that gets an opportunity
 -- created, not a lead-time input weeks earlier. Do not add a lag shift to this file without
 -- new evidence contradicting that finding -- same rule, restated here so it isn't silently
@@ -24,7 +24,7 @@
 --
 -- BOOKED VS. HELD -- confirmed live: FCT_CRM_MEETING.MEETING_STATUS already has exactly the 4
 -- values needed (completed / scheduled / cancelled / no_show), no second join required.
--- "Booked" = every row (all statuses) created in the period; "Held" = MEETING_STATUS =
+-- "Booked" = every row (all statuses) created in the period -- "Held" = MEETING_STATUS =
 -- 'completed'. Held will always be <= booked by construction.
 --
 -- INBOUND VS. OUTBOUND -- FCT_CRM_MEETING itself doesn't carry this (confirmed live, checked
@@ -35,7 +35,7 @@
 --
 -- SDR POD MAPPING -- same sdr_segment CASE (TEAM_NAME = 'SMB SDRs' / 'MM/Enterprise SDRs' /
 -- 'Strategic SDRs') as sdr_activity_to_pipeline.sql. STRATEGIC SDR HEADCOUNT = 1 PERSON (Louis
--- Trujillo, per that file's already-validated finding) -- carried forward here unchanged;
+-- Trujillo, per that file's already-validated finding) -- carried forward here unchanged --
 -- re-verify before presenting if headcount may have changed. `sdr_headcount` = COUNT DISTINCT
 -- SDRs who logged at least one activity that month, not a static roster size, so a 1-person
 -- column reads visibly differently from a multi-person one.
@@ -49,6 +49,14 @@
 -- incident and sdr_activity_to_pipeline.sql's own fix: `is_partial_month` marks the
 -- still-forming current calendar month explicitly so a small in-progress number doesn't read
 -- as a real collapse.
+--
+-- STRAY SEMICOLONS IN COMMENTS FIXED 2026-08-06 -- caught while pasting this file's
+-- `pipeline` CTE into insights_forecast_decline_drivers.sql (Task 8, Debrief restructure):
+-- 3 literal semicolons inside this header's prose (the same-month-framing line, the
+-- "Booked"/"Held" line, and the Louis Trujillo line) broke the naive multi-statement
+-- validation splitter (docs/superblocks-setup.md 4.18's own documented lesson, apparently
+-- missed on this file when written down). Replaced with "--", this repo's own
+-- prose-separator convention.
 
 WITH months AS (
     SELECT DATEADD(month, -SEQ4(), DATE_TRUNC('month', CURRENT_DATE())) AS mo

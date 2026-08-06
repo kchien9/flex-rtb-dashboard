@@ -11,10 +11,10 @@
 -- because Expansion coverage is already thin (~15-62% by segment). Stacking a multi-month
 -- streak requirement on top of that thin, deal-type-specific coverage would be noise on noise.
 -- New Logo has the cleanest, highest-coverage first-touch definition (simple first-activity-
--- ever-on-the-account) -- kept to that scope here; extend to Expansion later only if this
+-- ever-on-the-account) -- kept to that scope here -- extend to Expansion later only if this
 -- proves useful and coverage supports it.
 --
--- BOTH DIRECTIONS SURFACE -- a lengthening cycle is bad news (buyer hesitancy, harder market);
+-- BOTH DIRECTIONS SURFACE -- a lengthening cycle is bad news (buyer hesitancy, harder market) --
 -- a shortening one is good news (more efficient selling) -- same "mix signal, not a decline-
 -- only signal" reasoning as insights_mix_shift_scanner.sql.
 --
@@ -32,6 +32,12 @@
 -- DATE_TRUNC('quarter', bp_month) technique as the other scanners. Lookback widened from 12 to
 -- 24 months (fixed, not scaled by a LookbackMonths param -- this file never had one) so Quarter
 -- grain still has enough periods for a real streak.
+--
+-- STRAY SEMICOLONS IN COMMENTS FIXED 2026-08-06 -- caught while pasting this file's Part A
+-- into insights_forecast_decline_drivers.sql (Task 8, Debrief restructure): 2 literal
+-- semicolons in this header's prose broke the naive multi-statement validation splitter
+-- (docs/superblocks-setup.md 4.18's own documented lesson, apparently missed on this file).
+-- Replaced with "--", this repo's own prose-separator convention.
 
 WITH emp_dedup AS (
     SELECT EMPLOYEE_SK, EMAIL
