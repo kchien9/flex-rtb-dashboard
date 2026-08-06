@@ -1133,7 +1133,7 @@ OTHER than the one below, there is no `_prior_period`/`_trailing_avg` pair for i
 | `rolled_out_units_cube.sql` | `new_integrated_units` | `recaptured_units`, `deactivated_units`, `net_change_units`, `integrated_total_units` |
 | `niro_units_cube.sql` | `niro_units` | `integrated_total_units` |
 | `closed_lost_rate_cube.sql` | `loss_rate_by_units` | `loss_rate_by_deals` |
-| `pipeline_cube.sql` | `units` (per component) | — (only metric the file has) |
+| `pipeline_cube.sql` | `units` (per component) — bind to `units_prior_period`/`units_trailing_avg_6mo`, note the word order and `_6mo` suffix differ from this table's other rows, fixed 2026-08-06 (was `prior_period_units`/`trailing_avg_units`, out of convention) | — (only metric the file has) |
 | `insights_net_units_bridge.sql` (all Parts) | `integrated_total` | `new_integrated`, `deactivated`, `recaptured`, `uplevel_to_integrated`, `downlevel_to_niro` |
 | `insights_mix_shift_scanner.sql` Part B-MSP/B-Rep | `expansion_share` | — (only metric these two Parts have) |
 | `sdr_activity_by_msp.sql` | `calls` | `meetings_booked`, `meetings_held` |
@@ -1147,7 +1147,7 @@ looking at — those flow columns have no comparison of their own yet.
 exist in the file** — confirmed by reading the committed SQL: no such Mustache parameter
 appears anywhere in the query body, only in the header's prose description (carried over from
 the plan's draft text). The file's actual mechanism is simpler than the header implies: every
-period's `prior_period_units`/`trailing_avg_units` is already computed via window functions
+period's `units_prior_period`/`units_trailing_avg_6mo` is already computed via window functions
 across every `expected_month` row the query returns, so Box 2's Time control for the Pipeline
 Subject just needs to pick which returned row to display/highlight client-side — it does not
 need to bind a `TargetPeriod` parameter into the query at all. Don't add a Superblocks component

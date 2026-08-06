@@ -54,7 +54,7 @@
 -- DUAL TIME COMPARISON -- CORRECTED 2026-08-06, this paragraph originally described a design
 -- (a {{ TargetPeriod.value }} parameter, granularity-scaled trailing windows) that was never
 -- actually built -- neither exists anywhere in this file's SQL, confirmed by grep. What's
--- actually implemented: `prior_period_units` (LAG) and `trailing_avg_units` (a flat 6-preceding-
+-- actually implemented: `units_prior_period` (LAG) and `units_trailing_avg_6mo` (a flat 6-preceding-
 -- row AVG, excluding the current row) computed directly against `expected_month`, partitioned
 -- by entity + component. This file has no `{{ Granularity.value }}` parameter at all -- every
 -- row is month-grain by construction (`DATE_TRUNC('month', ...)` on both ANTICIPATED_GO_LIVE_
@@ -255,7 +255,7 @@ SELECT
     -- the pipeline right in front of us" -- not a historical replay (this cube shows current,
     -- forward-looking state only -- insights_forward_pipeline_trend.sql already owns the as-of-
     -- N-days-ago historical reconstruction, this file does not duplicate that).
-    LAG(units) OVER (PARTITION BY entity, component ORDER BY expected_month) AS prior_period_units,
-    AVG(units) OVER (PARTITION BY entity, component ORDER BY expected_month ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS trailing_avg_units
+    LAG(units) OVER (PARTITION BY entity, component ORDER BY expected_month) AS units_prior_period,
+    AVG(units) OVER (PARTITION BY entity, component ORDER BY expected_month ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS units_trailing_avg_6mo
 FROM periods
 ORDER BY entity, component, expected_month;
