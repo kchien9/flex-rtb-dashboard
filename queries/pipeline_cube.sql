@@ -91,9 +91,17 @@ current_rep AS (
     FROM user_dedup
 ),
 acct_msp AS (
-    -- Account-level MSP, same join niro_units_cube.sql already validated -- confirmed 1:1,
-    -- no fan-out risk.
-    SELECT ACCOUNT_SALESFORCE_ID, ACCOUNT_PROPERTY_MANAGEMENT_SOFTWARES AS msp
+    -- Account-level MSP -- FIXED 2026-08-06, same bug caught in sdr_activity_by_msp.sql (Task
+    -- 7): DIM_CRM_ACCOUNT_HISTORY.ACCOUNT_ID mixes Salesforce-format and HubSpot-format IDs
+    -- depending on SOURCE_SYSTEM, roughly 50/50. Joining only on ACCOUNT_SALESFORCE_ID (the
+    -- original version of this CTE) resolved MSP for only ~49.6% of accounts -- confirmed live,
+    -- same order of magnitude as sdr_activity_by_msp.sql's own SFID-only miscount. Widened to an
+    -- OR across both ID columns -- confirmed live: 126,667 of 126,675 current accounts (99.99%)
+    -- now resolve, and the OR introduces no fan-out (checked SALES_ACCOUNT_KEY row counts before/
+    -- after, unchanged). Every other file in this repo using this join (insights_net_units_
+    -- bridge.sql, insights_mix_shift_scanner.sql, sdr_activity_by_msp.sql) already uses this
+    -- OR pattern -- this file was the one built before the gap was found, now brought in line.
+    SELECT ACCOUNT_SALESFORCE_ID, ACCOUNT_HUBSPOT_ID, ACCOUNT_PROPERTY_MANAGEMENT_SOFTWARES AS msp
     FROM PRODUCTION.SALES.DIM_SALES_ACCOUNTS
 ),
 open_pipeline AS (
@@ -112,7 +120,7 @@ open_pipeline AS (
     LEFT JOIN current_rep cr ON cr.FULL_NAME = e.FULL_NAME
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
-    LEFT JOIN acct_msp am ON am.ACCOUNT_SALESFORCE_ID = a.ACCOUNT_ID
+    LEFT JOIN acct_msp am ON am.ACCOUNT_SALESFORCE_ID = a.ACCOUNT_ID OR am.ACCOUNT_HUBSPOT_ID = a.ACCOUNT_ID
     WHERE NOT o.IS_CLOSED
       AND o.OPPORTUNITY_TYPE != 'New Vertical'
       AND o.ANTICIPATED_GO_LIVE_AT_UTC >= CURRENT_DATE()
@@ -137,7 +145,7 @@ closed_awaiting_rollout AS (
     LEFT JOIN current_rep cr ON cr.FULL_NAME = e.FULL_NAME
     LEFT JOIN FLEX.SALES.DIM_CRM_ACCOUNT_HISTORY a ON o.CRM_ACCOUNT_SK = a.CRM_ACCOUNT_SK AND a.IS_CURRENT = TRUE
     LEFT JOIN pmc_size ps ON a.PMC_ID = ps.PMC_ID
-    LEFT JOIN acct_msp am ON am.ACCOUNT_SALESFORCE_ID = a.ACCOUNT_ID
+    LEFT JOIN acct_msp am ON am.ACCOUNT_SALESFORCE_ID = a.ACCOUNT_ID OR am.ACCOUNT_HUBSPOT_ID = a.ACCOUNT_ID
     WHERE o.IS_CLOSED_WON
       AND o.OPPORTUNITY_TYPE != 'New Vertical'
       AND li.ROLLOUT_MONTH > CURRENT_DATE()
