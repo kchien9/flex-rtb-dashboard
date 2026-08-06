@@ -945,6 +945,9 @@ compile error.
 
 ## 4.20. Debrief Restructure: Box 1 (General Business Summary) + Box 2 (Dig In) wiring (written down 2026-08-06)
 
+(Numbered 4.20 per the implementation plan directly, skipping 4.19 — no 4.19 section exists in
+this doc's history, this isn't a typo, just an intentional jump specified by the plan.)
+
 Full design: `docs/superpowers/specs/2026-08-05-debrief-restructure-design.md`. Implements the
 6 SQL files built/extended in the Debrief restructure (`pipeline_cube.sql`,
 `rolled_out_units_cube.sql`, `niro_units_cube.sql`, `closed_lost_rate_cube.sql`,
@@ -1009,6 +1012,19 @@ Persistent card, always rendered above Box 2, never hidden by any filter interac
 
 Four button groups: Subject (single-select) / Breakout (single-select, optional) / Filter
 (multi-select, optional) / Time (This Week/Month/Quarter, or a period-picker value).
+
+**"Week" is not actually built on any of these files — don't wire it as a real option yet.**
+Checked live: `niro_units_cube.sql`/`closed_lost_rate_cube.sql`/`insights_net_units_bridge.sql`
+only have a binary `{{ Granularity.value }}` check (`'Quarter'` vs. everything else falls to
+Month) — selecting "Week" silently behaves as Month, no error, no warning.
+`pipeline_cube.sql`/`rolled_out_units_cube.sql` have no `Granularity.value` parameter at all —
+month-grain by construction. The design spec's own Week-grain rule (lead with the trailing
+average, not a single noisy prior week) was never implemented anywhere, because Week itself was
+never implemented. Either hide the Week option from this button group until real Week support
+is built, or if it must ship now, label it clearly as "not yet supported, falls back to Month"
+— don't let it silently do the wrong thing. This dashboard already has a working Week option
+elsewhere (`performance_cube`, §3), so a builder could reasonably assume it works here too if
+not told otherwise.
 
 **Subject → query resource, and which breakout mechanism applies.** Two different mechanisms
 exist across these files — the Breakout button group has to be wired differently depending on
@@ -1137,12 +1153,28 @@ Subject just needs to pick which returned row to display/highlight client-side �
 need to bind a `TargetPeriod` parameter into the query at all. Don't add a Superblocks component
 looking for a parameter named `TargetPeriod` on this file; it will bind to nothing.
 
-**No Breakout selected** → LLM narration receives one aggregate row, produces one sentence, no
-per-entity breakdown (see spec's "No Breakout selected" clarification). For the two Part-per-
-breakout Subjects, "no breakout" still means calling a specific query resource (`insights_net_
-units_bridge.sql` Part A for Deactivations/Uplevel/Downlevel, `insights_mix_shift_scanner.sql`
-Part B-Segment for Opportunity Type mix at Segment grain) — there's no "blank Dimension" option
-on these two files the way there is on the 4 `{{ Dimension.value }}`-driven cubes.
+**"No Breakout selected" — resolved, this needed clarifying (caught in review).** The spec's
+promise is "one aggregate row, one sentence, no per-entity breakdown." Only ONE query resource
+in this whole build actually satisfies that literally: `insights_net_units_bridge.sql` Part A
+(genuinely ungrouped, company-wide). Every other file's "no breakout" default still runs a
+`GROUP BY segment_bucket`-style query underneath (the 4 `{{ Dimension.value }}`-driven cubes
+bound to `'segment_bucket'`, `sdr_funnel_by_segment.sql`, `insights_mix_shift_scanner.sql` Part
+B-Segment) — that returns 4-5 rows, not 1, UNLESS the active Filter has already narrowed the
+result down to a single entity (e.g. Filter=Team:Sebastian's Team → the Segment cut collapses
+to exactly 1 row, because one team maps to one segment). So:
+- **No Filter + No Breakout** → multiple rows come back (one per segment). Don't try to force
+  a single-row SQL result for this case — instead, tell the narration prompt to synthesize ONE
+  sentence across the returned rows ("combining across all segments: X units, up Y%"), not list
+  each segment out. This achieves the "one sentence" promise at the narration layer, not the
+  SQL layer.
+- **Filter narrows to one entity + No Breakout** → the query already returns 1 row naturally,
+  no narration synthesis needed — this is the common case (Kevin's own example: "SMB team this
+  month" with no explicit breakout).
+- For the two Part-per-breakout Subjects, "no breakout" means calling Part A (Deactivations/
+  Uplevel/Downlevel) or Part B-Segment (Opportunity Type mix) — there's no "blank Dimension"
+  option on these two files the way there is on the 4 cubes, so the same multi-row-unless-
+  filtered logic above applies to Part B-Segment specifically (Part A is already the true
+  single-row case).
 
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
