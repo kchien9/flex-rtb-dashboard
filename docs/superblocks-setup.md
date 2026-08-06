@@ -943,6 +943,202 @@ already to use `--` as a prose separator, never a literal semicolon, in comment 
 double-checking new header comments for stray semicolons before validating, not just after a
 compile error.
 
+## 4.20. Debrief Restructure: Box 1 (General Business Summary) + Box 2 (Dig In) wiring (written down 2026-08-06)
+
+Full design: `docs/superpowers/specs/2026-08-05-debrief-restructure-design.md`. Implements the
+6 SQL files built/extended in the Debrief restructure (`pipeline_cube.sql`,
+`rolled_out_units_cube.sql`, `niro_units_cube.sql`, `closed_lost_rate_cube.sql`,
+`insights_net_units_bridge.sql`, `insights_mix_shift_scanner.sql`, `sdr_activity_by_msp.sql`,
+`insights_forecast_decline_drivers.sql`). **Everything below was checked against the actual
+committed files, not assumed from the plan** — several real gaps surfaced while building those
+files that change how the wiring has to work; they're called out explicitly so Superblocks isn't
+wired against an idealized version of a file that doesn't match what's actually there.
+
+### Box 1 wiring
+
+Persistent card, always rendered above Box 2, never hidden by any filter interaction.
+
+- Bind to a query call with EVERY dimension filter parameter left blank/unbound (`Team.value`,
+  `Segment.value`, `Msp.value`, `DealType.value`, `Rep.value` all empty) on every source file
+  below. Only the global Time Horizon control (This Week/Month/Quarter) feeds this box — it has
+  no dimension lens of its own (Segment/MSP/Team selector), by design (see §4.10).
+- **Pooled sources** (call each with the same blank-filter binding):
+  - `ai_summary_facts.sql` Part A — company-wide unit trend, new vs. recaptured split.
+  - `insights_declining_streaks.sql` — Team/segment/MSP decline streaks (all parts).
+  - `insights_mix_shift_scanner.sql` Parts A, B, B-Segment, C, C-Segment — MSP share moves, New
+    Logo vs. Expansion mix, New vs. Recaptured mix. (Part B-MSP and Part B-Rep exist for Box 2's
+    breakout use, not required here — see Box 2 section below.)
+  - `insights_niro_mix_trend.sql` — rising NIRO-share streaks by segment/team.
+  - `insights_closed_lost_streak.sql` — rising loss-rate streaks by segment/team/MSP/deal type.
+  - `insights_net_units_bridge.sql` Parts A and C — company-wide net-units bridge, churn-
+    acceleration streak.
+  - `insights_forecast_decline_drivers.sql` — forecast-decline flag + candidate-driver checks
+    (fires conditionally — zero rows when there's no real decline in the live window; that's a
+    correct empty result per that file's own header, not a wiring failure).
+  - Same-month SDR/pipeline co-movement — `sdr_activity_to_pipeline.sql` /
+    `sdr_funnel_by_segment.sql`'s existing activity + `pipeline_created` columns (no new file;
+    reuses the already-validated same-month correlation finding, per the spec's item 6).
+- **LLM narration prompt**: "You will receive facts from up to 8 different sources. Pick the 3-5
+  MOST MATERIAL facts across the whole set — prioritize by magnitude of change and streak
+  length, not by which source they came from. If `insights_forecast_decline_drivers.sql` returns
+  a row, ALWAYS include it (a forecast decline is always material) and phrase any candidate
+  driver as 'coincided with,' never 'caused by.'"
+- **Two edge cases `insights_forecast_decline_drivers.sql` can return that the prompt must
+  handle DIFFERENTLY, not collapse into one generic 'no driver' line** (verified live against
+  that file's own header, 2026-08-06):
+  1. **`stage_velocity_worsened` is structurally only ever non-NULL when `segment_bucket =
+     'SMB'`** — the stage-velocity check uses a different 3-way segment taxonomy
+     (SMB/DSMB/Strategic-MM) than the other 3 checks' 3-real-segment one (MM/Ent/Strategic/SMB),
+     and the join is a literal string match, so 'Strategic' or 'MM/Ent' never matches
+     'Strategic/MM'. This is a real taxonomy coverage gap, not a bug. When `avg_days_in_stage`
+     is NULL and `stage_velocity_worsened = FALSE` for a non-SMB segment, the prompt should say
+     **"no stage-velocity data available for this segment"** — not blend that into "checked and
+     found nothing."
+  2. **If `driver_segment = 'Not Set'`, all 4 candidate-driver checks join to zero rows by
+     construction** (the 4 checks' own segment CASE expressions never produce the literal
+     string `'Not Set'`, so nothing on the right side of the join can ever match it) — every
+     flag renders FALSE with NULL underlying values, which looks identical to "checked all 4 and
+     genuinely found nothing" even though no check actually ran. The prompt should say
+     **"no driver data available for this decline (unattributed segment)"** for this case, and
+     reserve the plain **"no clear driver identified this period"** phrasing for the real case
+     (a resolved segment, all 4 checks ran, all 4 came back FALSE/favorable). These two
+     phrasings mean different things and the file's own NULL columns are what let the prompt
+     tell them apart — check `segment_bucket = 'Not Set'` before choosing which line to write.
+
+### Box 2 wiring
+
+Four button groups: Subject (single-select) / Breakout (single-select, optional) / Filter
+(multi-select, optional) / Time (This Week/Month/Quarter, or a period-picker value).
+
+**Subject → query resource, and which breakout mechanism applies.** Two different mechanisms
+exist across these files — the Breakout button group has to be wired differently depending on
+which one a Subject uses:
+- **`{{ Dimension.value }}`-driven** (one query resource, Breakout sets a bound parameter that
+  resolves to a bare column name — never wrap it in a CASE, see the callout below):
+  `rolled_out_units_cube.sql`, `niro_units_cube.sql`, `closed_lost_rate_cube.sql`,
+  `pipeline_cube.sql`.
+- **Part-per-breakout** (separate SQL statements/query resources, one per breakout — clicking a
+  Breakout button must call a DIFFERENT Superblocks query resource, not set a parameter on the
+  same one): `insights_net_units_bridge.sql` (Parts A/B/B2/B3/B4) and
+  `insights_mix_shift_scanner.sql`'s Part B family (Part B/B-Segment/B-MSP/B-Rep).
+- **SDR Activity is its own case, neither of the above** — Segment and Rep are two structurally
+  different existing files (`sdr_funnel_by_segment.sql`, `sdr_activity_by_rep.sql`), MSP is a
+  third file (`sdr_activity_by_msp.sql`), and there is no Team option at all (see below).
+
+| Subject | No Breakout / Segment | Team | MSP | Rep |
+|---|---|---|---|---|
+| Units (New+Recap) | `rolled_out_units_cube.sql`, `Dimension.value = 'segment_bucket'` | `Dimension.value = 'team_bucket'` | `Dimension.value = 'PMS'` | `Dimension.value = 'HUBSPOT_DEAL_OWNER'` |
+| NIRO | `niro_units_cube.sql`, `Dimension.value = 'segment_bucket'` | `'team_bucket'` | `'acct_pms'` | `'HUBSPOT_DEAL_OWNER'` |
+| Loss Rate | `closed_lost_rate_cube.sql`, `'segment_bucket'` | `'team_bucket'` | `'msp'` | `'rep'` |
+| Pipeline | `pipeline_cube.sql`, `'segment_bucket'` | `'team_bucket'` | `'msp'` | `'rep'` |
+| Deactivations/Uplevel/Downlevel | `insights_net_units_bridge.sql` Part A (no breakout) / Part B (segment) | Part B2 | Part B3 | Part B4 |
+| Opportunity Type mix | `insights_mix_shift_scanner.sql` Part B-Segment | Part B | Part B-MSP | Part B-Rep |
+| SDR Activity | `sdr_funnel_by_segment.sql` (segment-grain row) | **not offered — see below** | `sdr_activity_by_msp.sql` | `sdr_activity_by_rep.sql` (drill-through, no `pipeline_created` column) |
+
+**Each `{{ Dimension.value }}`-driven cube resolves its own column names for the same logical
+breakout differently** (confirmed by reading each file, not assumed) — the Breakout button's
+bound value must be per-cube, never one shared literal string across all four: `msp` on
+`closed_lost_rate_cube.sql`/`pipeline_cube.sql`, but `PMS` on `rolled_out_units_cube.sql` and
+`acct_pms` on `niro_units_cube.sql`. **`{{ Dimension.value }}` must render as a bare, unquoted
+column identifier, never inside a `CASE {{ Dimension.value }} WHEN ...` wrapper** —
+`pipeline_cube.sql`'s header documents a real bug where an earlier draft did exactly that
+(`CASE rep WHEN 'segment_bucket' THEN ...` tests a rep's name against a literal string, which
+can never match) and silently returned 100% `'Not Set'` for every breakout while `SUM(units)`
+totals still looked correct, because the underlying `GROUP BY` was still correct — only the
+label was wrong. If a new Breakout ever renders as all-`'Not Set'` in Superblocks, check for
+this exact pattern before assuming a data problem.
+
+**SDR Activity × Team is deliberately excluded, not a gap to fill in** —
+`sdr_activity_by_msp.sql`'s header explains why: SDR pods (SMB/MM-Ent/Strategic) don't map 1:1
+to the 4 AE teams (Sebastian's and Rory's Teams both sit under the one SMB SDR pod). The
+Breakout button group for the SDR Activity Subject should offer Segment/MSP/Rep only — no Team
+option, and don't add one without a real SDR-org re-mapping first.
+
+**Filter wiring — not every query resource above accepts the same filters, verify per-resource
+before assuming the shared Team/Segment/Msp/DealType/Rep components apply everywhere:**
+- All 4 `{{ Dimension.value }}`-driven cubes and `insights_net_units_bridge.sql`'s Parts A/B/
+  B2/B3/B4 accept all 5 multi-select filters (as of Tasks 1-6).
+- `insights_mix_shift_scanner.sql` Part B and Part B-Segment (Team/Segment cuts) have **no
+  filters and no dual time comparison at all** — confirmed by reading the file, this is
+  in-scope-as-written, not an oversight (the file's own header states this explicitly: only the
+  two NEW cuts added in this pass, Part B-MSP and Part B-Rep, got filters + dual time
+  comparison). Part C and Part C-Segment (New vs. Recaptured) likewise have neither. If Sham
+  filters while Breakout = Segment or Team on the Opportunity Type mix Subject, the filter
+  controls should be disabled/hidden for those two query resources rather than silently doing
+  nothing.
+- `insights_mix_shift_scanner.sql` Part B-MSP and Part B-Rep deliberately do **not** offer a
+  DealType filter (Team/Segment/Msp/Rep only) — this Part's own headline metric
+  (`expansion_share`) is itself a split on deal type, so filtering to one deal type would
+  trivially force every entity's share to 0% or 100%. Don't wire a DealType control onto these
+  two resources even though every other cube in this repo has one.
+- `sdr_activity_by_msp.sql` takes `GraceMonths.value`/`LookbackMonths.value` only — no Team/
+  Segment/Msp/DealType/Rep filters exist on this file at all.
+
+**Msp filter component — verify option lists before wiring one shared `Msp` dropdown across
+every Subject.** Reading the actual current files shows FOUR different MSP resolution
+mechanisms in play, not just "some fixed, some not":
+1. `rolled_out_units_cube.sql` filters on `PMS` directly on `PROPERTY_BP_MONTH_STATS`
+   (property-level, populated only on already-integrated properties).
+2. `closed_lost_rate_cube.sql` filters on `PARTNER_MANAGEMENT_SOFTWARE` directly on
+   `FCT_CRM_OPPORTUNITY` (deal-grain field, no account join at all).
+3. `niro_units_cube.sql`, `insights_net_units_bridge.sql`, and `insights_mix_shift_scanner.sql`
+   resolve MSP via `DIM_SALES_ACCOUNTS.ACCOUNT_PROPERTY_MANAGEMENT_SOFTWARES` joined on
+   `HUBSPOT_COMPANY_ID = ACCOUNT_SALESFORCE_ID` — a single-ID-format join against the OLD table
+   (`PROPERTY_BP_MONTH_STATS`'s own HubSpot company ID).
+4. `pipeline_cube.sql` and `sdr_activity_by_msp.sql` resolve MSP via the same
+   `DIM_SALES_ACCOUNTS` table but joined against the NEW table's `DIM_CRM_ACCOUNT_HISTORY.
+   ACCOUNT_ID`, OR'd across `ACCOUNT_SALESFORCE_ID`/`ACCOUNT_HUBSPOT_ID` (the dual-ID-format fix
+   from Tasks 7-8, needed because `ACCOUNT_ID` mixes Salesforce- and HubSpot-format IDs
+   depending on `SOURCE_SYSTEM`).
+   
+   `pipeline_cube.sql`'s own header claims group 3's files "already use this OR pattern" —
+   **that claim does not hold on a direct read of the current files**: `insights_net_units_
+   bridge.sql` and `insights_mix_shift_scanner.sql` still join `HUBSPOT_COMPANY_ID` (a different
+   source column, on the old table) to `ACCOUNT_SALESFORCE_ID` alone, no OR, no
+   `ACCOUNT_HUBSPOT_ID`. Whether that specific join needs the same dual-ID fix hasn't been
+   checked live — flagged here as a follow-up, not fixed in this pass (this task is
+   documentation-only, no live Snowflake access). Don't assume a single `Msp` dropdown's
+   distinct-value list is identical across all 7 files until this is checked; build the
+   dropdown's option list from whichever cube is currently bound, or from a live
+   `SELECT DISTINCT` against each source if Sham's expectation is one consistent list dashboard-
+   wide.
+
+**Time wiring — dual comparison columns exist, but only for ONE headline metric per file, not
+every metric a Subject's query resource returns.** If Box 2's UI ever lets Sham pick a metric
+OTHER than the one below, there is no `_prior_period`/`_trailing_avg` pair for it yet:
+
+| File | Metric WITH comparison | Metrics WITHOUT comparison (same file) |
+|---|---|---|
+| `rolled_out_units_cube.sql` | `new_integrated_units` | `recaptured_units`, `deactivated_units`, `net_change_units`, `integrated_total_units` |
+| `niro_units_cube.sql` | `niro_units` | `integrated_total_units` |
+| `closed_lost_rate_cube.sql` | `loss_rate_by_units` | `loss_rate_by_deals` |
+| `pipeline_cube.sql` | `units` (per component) | — (only metric the file has) |
+| `insights_net_units_bridge.sql` (all Parts) | `integrated_total` | `new_integrated`, `deactivated`, `recaptured`, `uplevel_to_integrated`, `downlevel_to_niro` |
+| `insights_mix_shift_scanner.sql` Part B-MSP/B-Rep | `expansion_share` | — (only metric these two Parts have) |
+| `sdr_activity_by_msp.sql` | `calls` | `meetings_booked`, `meetings_held` |
+
+For the Deactivations/Uplevel/Downlevel Subject specifically: the Time control's dual-comparison
+badge should bind to `integrated_total_prior_period`/`integrated_total_trailing_avg_6period`
+(the stock total), not to whichever flow metric (deactivated/uplevel/downlevel) Sham is actually
+looking at — those flow columns have no comparison of their own yet.
+
+**`pipeline_cube.sql`'s header references a `{{ TargetPeriod.value }}` parameter that does not
+exist in the file** — confirmed by reading the committed SQL: no such Mustache parameter
+appears anywhere in the query body, only in the header's prose description (carried over from
+the plan's draft text). The file's actual mechanism is simpler than the header implies: every
+period's `prior_period_units`/`trailing_avg_units` is already computed via window functions
+across every `expected_month` row the query returns, so Box 2's Time control for the Pipeline
+Subject just needs to pick which returned row to display/highlight client-side — it does not
+need to bind a `TargetPeriod` parameter into the query at all. Don't add a Superblocks component
+looking for a parameter named `TargetPeriod` on this file; it will bind to nothing.
+
+**No Breakout selected** → LLM narration receives one aggregate row, produces one sentence, no
+per-entity breakdown (see spec's "No Breakout selected" clarification). For the two Part-per-
+breakout Subjects, "no breakout" still means calling a specific query resource (`insights_net_
+units_bridge.sql` Part A for Deactivations/Uplevel/Downlevel, `insights_mix_shift_scanner.sql`
+Part B-Segment for Opportunity Type mix at Segment grain) — there's no "blank Dimension" option
+on these two files the way there is on the 4 `{{ Dimension.value }}`-driven cubes.
+
 ## 5. Known landmines (see README's full gotchas list for the complete set)
 
 - Two different "Team" taxonomies exist across old-table (`HUBSPOT_STATIC_TEAM_NAME_DEAL`)
