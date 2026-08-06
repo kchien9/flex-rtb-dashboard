@@ -52,6 +52,15 @@ TASKS 5-8:
   function if one exists; otherwise pick the most central/headline metric for that file's
   Subject and document the reasoning inline, the same way Tasks 2-4 did.
 
+**Quantified findings belong IN THE FILE, not just the commit message (added after Task 6's
+review caught this lesson regressing one commit after Task 5 established it)** — if live
+validation surfaces a real number worth knowing (a Not-Set rate, a reconciliation gap, a data
+quality caveat), put the ACTUAL NUMBER in the relevant Part's header comment, not just the git
+commit message. "See the commit message" is not an acceptable substitute — a future reader
+building a Superblocks chart off this file will never read git log. This already happened once
+(Task 5's Part B3) and regressed once (Task 6) before being caught by review both times — don't
+let it happen a third time in Tasks 7-8.
+
 ---
 
 ## File Structure
