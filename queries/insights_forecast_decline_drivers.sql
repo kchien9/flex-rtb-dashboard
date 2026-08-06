@@ -370,6 +370,12 @@ win_rate_check AS (
                 SUM(IFF(FLEX_UNIT_COUNT IS NOT NULL, FLEX_UNIT_COUNT, 0)) AS total_closed_units,
                 SUM(IFF(NOT IS_CLOSED_WON, FLEX_UNIT_COUNT, 0)) AS units_lost
             FROM scoped
+            -- closed_lost_rate_cube.sql's {{#Segment.value}} filter block is deliberately NOT
+            -- pasted here (Team/Msp/DealType/Rep are) -- this file's own join key IS
+            -- segment_bucket, so an accidentally-bound Segment.value would silently narrow
+            -- win_rate_check to one segment while `decline` keeps scanning all of them,
+            -- breaking driver attribution for every other segment. Dropped on purpose, not
+            -- missed.
             WHERE segment_bucket IS NOT NULL
               {{#Team.value}}     AND team_bucket    IN ({{Team.value}})    {{/Team.value}}
               {{#Msp.value}}      AND msp            IN ({{Msp.value}})     {{/Msp.value}}
