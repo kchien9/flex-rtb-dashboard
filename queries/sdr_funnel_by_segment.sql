@@ -50,6 +50,12 @@
 -- still-forming current calendar month explicitly so a small in-progress number doesn't read
 -- as a real collapse.
 --
+-- SEGMENT FILTER WIDENED TO MULTI-SELECT (2026-08-06) -- this file is a Box 2 query resource
+-- (Debrief restructure, docs/superpowers/specs/2026-08-05-debrief-restructure-design.md) --
+-- caught in the plan's final whole-implementation review that this Segment filter was still
+-- `= '{{Segment.value}}'`, a single-value 2-value selection against it would have been a hard
+-- SQL syntax error. Widened to `IN ({{Segment.value}})`, same convention as every cube file.
+--
 -- STRAY SEMICOLONS IN COMMENTS FIXED 2026-08-06 -- caught while pasting this file's
 -- `pipeline` CTE into insights_forecast_decline_drivers.sql (Task 8, Debrief restructure):
 -- 3 literal semicolons inside this header's prose (the same-month-framing line, the
@@ -164,5 +170,5 @@ LEFT JOIN activity a ON a.mo = mo.mo
 LEFT JOIN meetings mt ON mt.mo = mo.mo AND mt.segment = a.segment
 LEFT JOIN pipeline p ON p.mo = mo.mo AND p.segment = COALESCE(a.segment, mt.segment)
 WHERE COALESCE(a.segment, mt.segment, p.segment) IS NOT NULL
-  {{#Segment.value}} AND COALESCE(a.segment, mt.segment, p.segment) = '{{Segment.value}}' {{/Segment.value}}
+  {{#Segment.value}} AND COALESCE(a.segment, mt.segment, p.segment) IN ({{Segment.value}}) {{/Segment.value}}
 ORDER BY segment, month;

@@ -34,6 +34,12 @@
 -- (not 0) when a rep has no prior-month row at all -- distinct from a real 0-activity month --
 -- so Superblocks can apply the same New/Stopped blank-handling rule from §4.14 rather than a
 -- misleading infinite/undefined percent.
+--
+-- SEGMENT FILTER WIDENED TO MULTI-SELECT (2026-08-06) -- this file is a Box 2 query resource
+-- (Debrief restructure, docs/superpowers/specs/2026-08-05-debrief-restructure-design.md) --
+-- caught in the plan's final whole-implementation review that this Segment filter was still
+-- `= '{{Segment.value}}'`, a single-value 2-value selection against it would have been a hard
+-- SQL syntax error. Widened to `IN ({{Segment.value}})`, same convention as every cube file.
 
 WITH emp_dedup AS (
     SELECT EMPLOYEE_SK, EMAIL
@@ -97,7 +103,7 @@ combined AS (
     FROM activity a
     FULL OUTER JOIN meetings mt ON a.mo = mt.mo AND a.rep = mt.rep
     WHERE COALESCE(a.sdr_segment, mt.sdr_segment) IS NOT NULL
-      {{#Segment.value}} AND COALESCE(a.sdr_segment, mt.sdr_segment) = '{{Segment.value}}' {{/Segment.value}}
+      {{#Segment.value}} AND COALESCE(a.sdr_segment, mt.sdr_segment) IN ({{Segment.value}}) {{/Segment.value}}
 )
 SELECT
     *,
