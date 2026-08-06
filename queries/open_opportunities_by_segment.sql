@@ -1,8 +1,17 @@
--- Open Opportunities, by Segment -- feeds the Pipeline tab per Kevin: "can we segment the
--- open opportunities? to see how many open opportunities each segment has? opps that havent
+-- Open Opportunities, by Segment/Team/Rep -- feeds the Pipeline tab per Kevin: "can we segment
+-- the open opportunities? to see how many open opportunities each segment has? opps that havent
 -- been touched in months can be excluded." Folded into Pipeline (not its own Opportunities
 -- tab) per Kevin's own call -- this is a forward-looking pipeline-composition question, same
 -- theme as the rest of that tab.
+--
+-- BREAKOUT WIDENED TO {{ Dimension.value }} (added 2026-08-06) -- Kevin: "want dropdowns by
+-- team and then by rep to show open deals and units." Same one-query-drives-every-slice
+-- pattern as rolled_out_units_cube.sql/niro_units_cube.sql/pipeline_cube.sql -- {{ Dimension.
+-- value }} is a Superblocks dropdown bound to a bare column name (`segment_bucket` /
+-- `team_bucket` / `rep`), never wrapped in a CASE (see pipeline_cube.sql's header for the exact
+-- bug this causes if it is -- a CASE {{ Dimension.value }} WHEN 'x' THEN ... dispatch tests the
+-- rendered column's VALUE against literal strings, not the placeholder's identity, and silently
+-- collapses every row into the ELSE branch).
 --
 -- STALENESS FILTER -- REBUILT 2026-07-29, UPDATED_AT_UTC WAS NOT A REAL SIGNAL. Kevin: "i see
 -- most of these have been opened for a very long time... some have been opened for 600+
@@ -41,7 +50,7 @@
 -- same reason). Confirmed live this resolves cleanly -- OWNER_SK on open deals mostly matches
 -- HubSpot-sourced employee records (80%), not Salesforce-sourced (20%, the opposite of the
 -- activity-table pattern used elsewhere in this repo) -- so this join deliberately does NOT
--- restrict to SOURCE_SYSTEM='salesforce' the way the rep-listing fixes elsewhere do; it only
+-- restrict to SOURCE_SYSTEM='salesforce' the way the rep-listing fixes elsewhere do -- it only
 -- needs IS_CURRENT=TRUE and matches on OWNER_SK's exact EMPLOYEE_SK value directly (no EMAIL/
 -- FULL_NAME fan-out risk since that's a precise 1:1 key match, not a name-based join). Real
 -- distribution after the fix: MM/Ent 1,059 opps/$4.85M, Strategic 591/$3.75M, SMB 6,250/$2.99M,
@@ -50,7 +59,11 @@
 -- Excludes segment_bucket = NULL (DSMB/Partner/SDR/leadership pods -- 2,794 opps/$3.6M,
 -- real volume that shouldn't get silently folded into a real segment's count, same principle
 -- as everywhere else in this repo, just now measured via the live owner instead of the stale
--- deal-time field).
+-- deal-time field). Team breakout narrows further than Segment the same way it does everywhere
+-- else in this repo (House Accounts and Not Set are valid SEGMENT values but not valid TEAM
+-- values -- no direct-report manager owns either) -- expect the Team-summed total to run below
+-- the Segment-summed total by however many House Accounts/Not Set opps exist -- that's a
+-- documented exclusion, not a reconciliation bug.
 --
 -- LEGACY HUBSPOT-ORIGIN RECORDS EXCLUDED (added 2026-07-29) -- see
 -- open_opportunities_drilldown.sql's header for the full writeup: FCT_CRM_OPPORTUNITY blends
@@ -64,10 +77,21 @@
 -- explicit `OPPORTUNITY_ID LIKE '006%'` filter below closes that gap directly rather than
 -- relying on the staleness heuristic alone.
 --
--- DEAL TYPE BREAKDOWN (added 2026-07-29) -- Kevin: "can open opportunities show stacked
--- breakdown for new logo vs expansion type opportunity." `deal_type` is now a group-by column
--- so Superblocks can stack New Logo vs Expansion (vs whatever else) within each segment bar --
--- the existing {{DealType.value}} filter still works for narrowing to one type if needed.
+-- DEAL TYPE BREAKDOWN, WIDENED TO MULTI-SELECT (2026-08-06, was single-value) -- Kevin: "can
+-- open opportunities show stacked breakdown for new logo vs expansion type opportunity," then
+-- "add filters for opp type that the bars will update on." `deal_type` is a group-by column so
+-- Superblocks can stack New Logo vs Expansion (vs whatever else) within each bar -- the
+-- {{DealType.value}} filter now takes a comma-separated multi-select list (`IN (...)`), same
+-- convention as every other cube in this repo, instead of narrowing to exactly one type.
+--
+-- "NEW VERTICAL" AND "NOT SET" DEAL TYPES -- CHECKED LIVE 2026-08-06, ALREADY CLEAN, NO FURTHER
+-- SQL NEEDED. New Vertical was already excluded (line below, added 2026-08-05). Checked
+-- whether OPPORTUNITY_TYPE can be NULL among opps that pass every other filter here --
+-- confirmed live: it can't. Real distribution today is exactly 3 clean values (New Logo/
+-- Expansion/Move In), no NULL, no "Add On." If Kevin's live Superblocks chart still shows
+-- New Vertical/Add On/Not Set as legend categories, that widget is running a STALE cached
+-- version of this query, not this committed one -- re-paste the current query text, don't
+-- add a redundant `OPPORTUNITY_TYPE IS NOT NULL` filter here for a case that doesn't occur.
 --
 -- FILTER ESCAPING -- same apostrophe risk as every value filter in this repo.
 
@@ -79,37 +103,49 @@ WITH last_activity AS (
         SELECT CRM_ACCOUNT_SK, STARTED_AT_UTC AS activity_date FROM FLEX.SALES.FCT_CRM_MEETING WHERE MEETING_STATUS = 'completed'
     )
     GROUP BY 1
+),
+base AS (
+    SELECT
+        CASE
+            WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
+            WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
+            WHEN d.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
+            WHEN d.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
+            WHEN d.TEAM_NAME IS NULL THEN 'Not Set'
+            ELSE NULL
+        END AS segment_bucket,
+        CASE
+            WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'Brandon''s Team'
+            WHEN d.TEAM_NAME = 'SMB Account Executives 1' THEN 'Sebastian''s Team'
+            WHEN d.TEAM_NAME = 'SMB Account Executives 2' THEN 'Rory''s Team'
+            WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Dana''s Team'
+            ELSE NULL
+        END AS team_bucket,
+        d.FULL_NAME AS rep,
+        o.OPPORTUNITY_TYPE AS deal_type,
+        o.FLEX_UNIT_COUNT AS units
+    FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
+    LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.IS_CURRENT = TRUE
+    LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
+    WHERE NOT o.IS_CLOSED
+      AND o.OPPORTUNITY_ID LIKE '006%'
+      -- New Vertical excluded repo-wide per Kevin 2026-08-05: "new verticals should not be
+      -- included anywhere in the dashboard" -- it has its own separate comp plan/tracking
+      -- (NEW_VERTICALS_PAYOUT), not part of this dashboard's core sales motion.
+      AND o.OPPORTUNITY_TYPE != 'New Vertical'
+      AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
+      {{#DealType.value}} AND o.OPPORTUNITY_TYPE IN ({{DealType.value}}) {{/DealType.value}}
 )
 SELECT
-    CASE
-        WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-        WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-        WHEN d.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-        WHEN d.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
-        WHEN d.TEAM_NAME IS NULL THEN 'Not Set'
-        ELSE NULL
-    END                                AS segment_bucket,
-    o.OPPORTUNITY_TYPE                 AS deal_type,
-    COUNT(*)                           AS open_opportunities,
-    SUM(o.FLEX_UNIT_COUNT)             AS open_pipeline_units
-FROM FLEX.SALES.FCT_CRM_OPPORTUNITY o
-LEFT JOIN FLEX.MART.DIM_EMPLOYEE_HISTORY d ON o.OWNER_SK = d.EMPLOYEE_SK AND d.IS_CURRENT = TRUE
-LEFT JOIN last_activity la ON o.CRM_ACCOUNT_SK = la.CRM_ACCOUNT_SK
-WHERE NOT o.IS_CLOSED
-  AND o.OPPORTUNITY_ID LIKE '006%'
-  -- New Vertical excluded repo-wide per Kevin 2026-08-05: "new verticals should not be
-  -- included anywhere in the dashboard" -- it has its own separate comp plan/tracking
-  -- (NEW_VERTICALS_PAYOUT), not part of this dashboard's core sales motion.
-  AND o.OPPORTUNITY_TYPE != 'New Vertical'
-  AND COALESCE(la.last_activity_date, o.CREATED_AT_UTC) >= DATEADD(month, -{{ RecencyMonths.value }}, CURRENT_DATE())
-  AND CASE
-        WHEN d.TEAM_NAME = 'Brandon''s Team' THEN 'MM/Ent'
-        WHEN d.TEAM_NAME IN ('Strategic Team', 'Cory''s Team', 'Heidi''s Team') THEN 'Strategic'
-        WHEN d.TEAM_NAME IN ('SMB Account Executives', 'SMB Account Executives 1', 'SMB Account Executives 2') THEN 'SMB'
-        WHEN d.TEAM_NAME = 'House Accounts' THEN 'House Accounts'
-        WHEN d.TEAM_NAME IS NULL THEN 'Not Set'
-        ELSE NULL
-    END IS NOT NULL
-  {{#DealType.value}} AND o.OPPORTUNITY_TYPE = '{{DealType.value}}' {{/DealType.value}}
+    COALESCE({{ Dimension.value }}, 'Not Set') AS entity,
+    deal_type,
+    COUNT(*)         AS open_opportunities,
+    SUM(units)       AS open_pipeline_units
+FROM base
+WHERE segment_bucket IS NOT NULL
+  -- Team breakout only: House Accounts/Not Set are valid Segment values but not valid Team
+  -- values (no direct-report manager owns either) -- narrowing here, not at the segment_bucket
+  -- gate above, so Segment/Rep breakouts still see the full population.
+  AND (NOT ('{{ Dimension.value }}' = 'team_bucket') OR team_bucket IS NOT NULL)
 GROUP BY 1, 2
 ORDER BY 4 DESC;
