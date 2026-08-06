@@ -34,6 +34,15 @@ value-count claim you plan to write into a file's header, compute it with `COUNT
 inside the query itself and read that single returned number — never eyeball/grep/count rows
 from the script's printed output when the real row count could plausibly exceed 60.
 
+**One commit per concern, even when a bug is found incidentally (caught in Task 8's review)** —
+Tasks 2 and 7 both correctly gave sibling-file bug fixes their OWN dedicated commit, separate
+from the feature commit that surfaced them (`fc91d3b`, `b556656`). Task 8 bundled 3 unrelated
+sibling-file fixes into its own feature commit instead — not a functional problem, but it makes
+`git bisect`/`git revert` harder later, and breaks the pattern every other task in this plan
+established. If you find a bug in another file while building yours, fix it, but commit it
+SEPARATELY, matching Task 2/7's precedent — don't bundle it into the feature commit just because
+you found it along the way.
+
 **A `COUNT(some_column)` after an `OR`-based join undercounts matches (also caught in Task 7)**
 — if a join condition is `a.id = b.col1 OR a.id = b.col2`, `COUNT(b.col1)` misses every row that
 matched via `col2` while `col1` is NULL on that side. If you're computing a join match-rate

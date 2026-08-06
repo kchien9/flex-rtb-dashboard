@@ -86,6 +86,20 @@
 -- (the NULL columns make the gap visible to narration, which should say "no stage-velocity
 -- data available for this segment," not blend it into "no decline").
 --
+-- 'Not Set' DRIVER_SEGMENT IS THE SAME KIND OF GAP AS THE STAGE-VELOCITY ONE ABOVE -- Part C's
+-- own `scoped` CTE COALESCEs an unattributed owner to the literal string 'Not Set', so
+-- `driver_segment` (and therefore this file's `segment_bucket`) CAN be 'Not Set'. None of the
+-- 4 checks' own segment CASE expressions ever produce that string -- each one falls to NULL
+-- for an unmapped team and gets removed by that check's own `WHERE ... IS NOT NULL` (or
+-- equivalent) before this file ever sees it. So a decline attributed to 'Not Set' will always
+-- join to zero rows across all 4 checks, by construction -- every flag renders FALSE with NULL
+-- underlying values, which looks identical to "checked all 4 and none moved unfavorably" even
+-- though no check actually ran. Same treatment as the stage-velocity coverage gap above:
+-- narration seeing a 'Not Set' `segment_bucket` alongside all-NULL check columns should say
+-- "no driver data available for this decline (unattributed segment)," not "no clear driver
+-- identified" -- the two phrasings mean different things and this file's own NULL columns are
+-- what let a reader tell them apart.
+--
 -- STAGE FILTER LOCKED TO 'Negotiation', NOT USER-SELECTABLE -- insights_stage_velocity.sql
 -- Part A covers 4 stages (Qualification/Discovery/Building Value/Negotiation) -- pulling all 4
 -- would produce multiple rows per segment/quarter (fan-out against this file's single-row-
