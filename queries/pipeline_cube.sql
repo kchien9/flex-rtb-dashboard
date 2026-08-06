@@ -51,12 +51,16 @@
 -- last login before dropping them, instead of vanishing the day IS_ACTIVE flips to FALSE. See
 -- the inline comment on `filtered`'s WHERE clause for the exact condition and scoping.
 --
--- DUAL TIME COMPARISON -- {{ TargetPeriod.value }} is the period Sham is inspecting (a BP
--- month or quarter). `prior_period_value` = the immediately preceding period of the same
--- grain. `trailing_avg_value` = trailing-4-quarters average if Granularity=Quarter, trailing-
--- 6-months if Granularity=Month, trailing-4-weeks if Granularity=Week (weeks not natively
--- supported by BP_MONTH grain -- Week granularity on this file falls back to Month, documented
--- limitation, revisit if Sham actually needs week-level pipeline).
+-- DUAL TIME COMPARISON -- CORRECTED 2026-08-06, this paragraph originally described a design
+-- (a {{ TargetPeriod.value }} parameter, granularity-scaled trailing windows) that was never
+-- actually built -- neither exists anywhere in this file's SQL, confirmed by grep. What's
+-- actually implemented: `prior_period_units` (LAG) and `trailing_avg_units` (a flat 6-preceding-
+-- row AVG, excluding the current row) computed directly against `expected_month`, partitioned
+-- by entity + component. This file has no `{{ Granularity.value }}` parameter at all -- every
+-- row is month-grain by construction (`DATE_TRUNC('month', ...)` on both ANTICIPATED_GO_LIVE_
+-- AT_UTC and ROLLOUT_MONTH), so there's no Quarter/Week case to scale for. If Quarter-grain
+-- pipeline is ever needed, that's new work (a Granularity toggle + a re-derivation of these two
+-- columns), not something already half-built here.
 
 WITH pmc_size AS (
     SELECT PMC_ID, SUM(PROPERTY_UNIT_COUNT) AS pmc_current_units
@@ -98,9 +102,16 @@ acct_msp AS (
     -- same order of magnitude as sdr_activity_by_msp.sql's own SFID-only miscount. Widened to an
     -- OR across both ID columns -- confirmed live: 126,667 of 126,675 current accounts (99.99%)
     -- now resolve, and the OR introduces no fan-out (checked SALES_ACCOUNT_KEY row counts before/
-    -- after, unchanged). Every other file in this repo using this join (insights_net_units_
-    -- bridge.sql, insights_mix_shift_scanner.sql, sdr_activity_by_msp.sql) already uses this
-    -- OR pattern -- this file was the one built before the gap was found, now brought in line.
+    -- after, unchanged). `sdr_activity_by_msp.sql` uses this same OR pattern against the same
+    -- DIM_CRM_ACCOUNT_HISTORY.ACCOUNT_ID column, for the same reason. CORRECTION 2026-08-06:
+    -- this comment previously claimed insights_net_units_bridge.sql/insights_mix_shift_
+    -- scanner.sql "already use this OR pattern too" -- checked live, that's not true (they join
+    -- a DIFFERENT source column, PROPERTY_BP_MONTH_STATS.HUBSPOT_COMPANY_ID, on a single ID
+    -- format, no OR) -- but it turns out they don't need the fix either: that column, despite
+    -- its name, is populated in Salesforce-ID format (99.85% match via ACCOUNT_SALESFORCE_ID
+    -- alone, confirmed live), not a mixed-format column like ACCOUNT_ID is. See
+    -- docs/superblocks-setup.md 4.20 for the full 4-way MSP-resolution comparison across every
+    -- cube in this repo.
     SELECT ACCOUNT_SALESFORCE_ID, ACCOUNT_HUBSPOT_ID, ACCOUNT_PROPERTY_MANAGEMENT_SOFTWARES AS msp
     FROM PRODUCTION.SALES.DIM_SALES_ACCOUNTS
 ),
