@@ -1091,17 +1091,22 @@ mechanisms in play, not just "some fixed, some not":
    from Tasks 7-8, needed because `ACCOUNT_ID` mixes Salesforce- and HubSpot-format IDs
    depending on `SOURCE_SYSTEM`).
    
-   `pipeline_cube.sql`'s own header claims group 3's files "already use this OR pattern" —
-   **that claim does not hold on a direct read of the current files**: `insights_net_units_
-   bridge.sql` and `insights_mix_shift_scanner.sql` still join `HUBSPOT_COMPANY_ID` (a different
-   source column, on the old table) to `ACCOUNT_SALESFORCE_ID` alone, no OR, no
-   `ACCOUNT_HUBSPOT_ID`. Whether that specific join needs the same dual-ID fix hasn't been
-   checked live — flagged here as a follow-up, not fixed in this pass (this task is
-   documentation-only, no live Snowflake access). Don't assume a single `Msp` dropdown's
-   distinct-value list is identical across all 7 files until this is checked; build the
-   dropdown's option list from whichever cube is currently bound, or from a live
-   `SELECT DISTINCT` against each source if Sham's expectation is one consistent list dashboard-
-   wide.
+   `pipeline_cube.sql`'s own header claims group 3's files "already use this OR pattern" — that
+   claim doesn't literally hold on a direct read of the current files (group 3 has no OR at
+   all), but **checked live 2026-08-06 and it doesn't need one**: `PROPERTY_BP_MONTH_STATS.
+   HUBSPOT_COMPANY_ID` is a misleadingly-named column — despite the name, its real stored values
+   are Salesforce-format IDs ("001..."), not HubSpot format. Confirmed live: 4,569 of 4,576
+   current PMCs (99.85%) match via `ACCOUNT_SALESFORCE_ID` alone; only 7 would match via
+   `ACCOUNT_HUBSPOT_ID`. Group 3's single-ID join is already effectively correct for this
+   specific source column — the dual-ID fix from Tasks 7-8 was needed for `DIM_CRM_ACCOUNT_
+   HISTORY.ACCOUNT_ID` specifically, which genuinely does mix formats; it doesn't generalize to
+   every account-ID-shaped column in this warehouse. No SQL change needed for group 3.
+
+   Still don't assume a single `Msp` dropdown's distinct-value list is identical across all 7
+   files — groups 1 and 2 don't touch `DIM_SALES_ACCOUNTS` at all, so their MSP value sets can
+   genuinely differ from groups 3/4's. Build the dropdown's option list from whichever cube is
+   currently bound, or from a live `SELECT DISTINCT` against each source if Sham's expectation
+   is one consistent list dashboard-wide.
 
 **Time wiring — dual comparison columns exist, but only for ONE headline metric per file, not
 every metric a Subject's query resource returns.** If Box 2's UI ever lets Sham pick a metric
