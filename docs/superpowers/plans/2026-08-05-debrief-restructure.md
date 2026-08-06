@@ -27,6 +27,20 @@ invariant stated in that step (not a fixed expected number — the real data cha
 so every check below is written as a structural/reconciliation invariant, e.g. "breakout totals
 sum back to the unbroken-out total," not "returns exactly 47,933").
 
+**`run_sql.py` truncates printed output at 60 rows (caught in Task 7's review)** — this bit a
+real header-comment claim (a manually-counted-from-printed-output "17 distinct MSPs" was
+actually 22 — the extra rows existed but were never printed). For ANY row-count or distinct-
+value-count claim you plan to write into a file's header, compute it with `COUNT(DISTINCT ...)`
+inside the query itself and read that single returned number — never eyeball/grep/count rows
+from the script's printed output when the real row count could plausibly exceed 60.
+
+**A `COUNT(some_column)` after an `OR`-based join undercounts matches (also caught in Task 7)**
+— if a join condition is `a.id = b.col1 OR a.id = b.col2`, `COUNT(b.col1)` misses every row that
+matched via `col2` while `col1` is NULL on that side. If you're computing a join match-rate
+percentage, count matched rows on the OTHER table's primary/unique key (or just `COUNT(*)` after
+the join, if row-level, not column-level, cardinality is what you want) — never a single
+join-column that's only guaranteed non-null on one branch of an OR.
+
 **Dual time comparison naming convention (added after Task 4's code review flagged drift
 risk)** — Tasks 1-4 established this pattern, READ BEFORE NAMING ANY NEW COMPARISON COLUMN IN
 TASKS 5-8:
